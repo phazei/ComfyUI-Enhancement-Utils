@@ -1,0 +1,94 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Resource Monitor - Horizontal Bar Styles
+ *
+ * The monitor renders as a row of small colored bars in the ComfyUI menu bar,
+ * each showing a metric (CPU, RAM, HDD, GPU, VRAM, Temp) as a percentage fill.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Container ──────────────────────────────────────────────────────────── */
+
+#enhutils-monitor-root {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: stretch;  /* Bars stretch to match menu bar height. */
+    gap: 4px;
+    padding: 0 4px;
+    user-select: none;
+}
+
+/* ── Individual Monitor Bar ─────────────────────────────────────────────── */
+
+.enhutils-monitor {
+    display: flex;
+    align-items: center;
+    position: relative;
+    min-width: 60px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid rgba(255, 255, 255, 0.20);
+    cursor: default;
+    /* No fixed height -- inherits from parent via align-items: stretch. */
+}
+
+/* Hidden monitors (disabled via settings). */
+.enhutils-monitor.hidden {
+    display: none;
+}
+
+/* ── Labels ─────────────────────────────────────────────────────────────── */
+
+/* Shared styles for both label elements. */
+.enhutils-monitor .enhutils-label-name,
+.enhutils-monitor .enhutils-label-value {
+    position: absolute;
+    font-weight: 700;
+    color: #fff;
+    z-index: 2;
+    pointer-events: none;
+    text-shadow:
+        0 0 3px rgba(0, 0, 0, 1),
+        0 0 6px rgba(0, 0, 0, 0.8),
+        0 1px 2px rgba(0, 0, 0, 1);
+    white-space: nowrap;
+    line-height: 1;
+}
+
+/* Metric name (e.g. "CPU", "Disk D:") -- top-left corner. */
+.enhutils-monitor .enhutils-label-name {
+    top: 2px;
+    left: 3px;
+    font-size: 10px;
+}
+
+/* Metric value (e.g. "45%", "72°") -- bottom-right corner. */
+.enhutils-monitor .enhutils-label-value {
+    bottom: 2px;
+    right: 3px;
+    font-size: 11px;
+}
+
+/* ── Slider (colored fill bar) ──────────────────────────────────────────── */
+
+.enhutils-monitor .enhutils-slider {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    width: 0%;
+    border-radius: 4px 0 0 4px;
+    transition: width 0.8s ease-out;
+    z-index: 1;
+}
+
+/* ── Color Themes per Metric ────────────────────────────────────────────── */
+
+.enhutils-monitor.cpu .enhutils-slider  { background: #E8960C; }  /* Amber/Orange */
+.enhutils-monitor.ram .enhutils-slider  { background: #0AA015; }  /* Green */
+.enhutils-monitor.disk .enhutils-slider { background: #6B5B7B; }  /* Muted gray-purple */
+.enhutils-monitor.gpu .enhutils-slider  { background: #0C86F4; }  /* Blue */
+.enhutils-monitor.vram .enhutils-slider { background: #0EA5A5; }  /* Teal */
+
+/* Temperature uses a dynamic gradient set inline via JS (green -> red). */
+.enhutils-monitor.temp .enhutils-slider { background: #0AA015; }

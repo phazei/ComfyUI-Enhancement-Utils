@@ -1,0 +1,19 @@
+[project]
+name = "comfyui-enhancement-utils"
+description = "A collection of enhancement utilities for ComfyUI: resource monitor, image loader with metadata and subfolder support, sound/notification alerts, graph arrangement tools, and node navigation aids."
+version = "0.1.0"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+dependencies = [
+    "psutil",
+    "piexif",
+]
+
+[project.urls]
+Repository = "https://github.com/phazei/ComfyUI-Enhancement-Utils"
+
+[tool.comfy]
+PublisherId = "phazei"
+DisplayName = "Enhancement Utils"
+Icon = ""
+Web = "./web/js"
