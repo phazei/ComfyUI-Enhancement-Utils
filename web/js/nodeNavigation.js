@@ -13,6 +13,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { findNodeByExecutionId, findNodePath } from "./utils.js";
 
 app.registerExtension({
     name: "phazei.NodeNavigation",
@@ -25,28 +26,7 @@ app.registerExtension({
         let focusDebounceId = null;
 
         // ── Subgraph Navigation Helpers ────────────────────────────────
-
-        /**
-         * Find the path of graph references from the root graph down to the
-         * graph containing `targetNode`. Needed for navigating into subgraphs.
-         *
-         * @param {Object} targetNode - The node to locate.
-         * @param {Object} [graph=app.graph] - The graph to search in.
-         * @param {Array} [path=[]] - Accumulated path of graph references.
-         * @returns {Array|null} Array of graph refs from root to target, or null.
-         */
-        const findNodePath = (targetNode, graph = app.graph, path = []) => {
-            for (const node of graph.nodes) {
-                if (node === targetNode) {
-                    return [...path, node.graph];
-                }
-                if (node.subgraph) {
-                    const found = findNodePath(targetNode, node.subgraph, [...path, node.graph]);
-                    if (found) return found;
-                }
-            }
-            return null;
-        };
+        // findNodePath and findNodeByExecutionId are imported from utils.js.
 
         /**
          * Center the canvas viewport on a node, navigating into subgraphs
@@ -73,30 +53,6 @@ app.registerExtension({
             } else {
                 centerOnNode();
             }
-        };
-
-        /**
-         * Resolve a colon-delimited execution ID (e.g. "5:12:3") to the actual
-         * node object, traversing subgraphs as needed.
-         *
-         * @param {string|number} id - The execution ID.
-         * @returns {Object|null} The node, or null if not found.
-         */
-        const findNodeByExecutionId = (id) => {
-            if (!id) return null;
-            const segments = String(id).split(":");
-            let currentGraph = app.graph;
-            let node = null;
-
-            for (let i = 0; i < segments.length; i++) {
-                node = currentGraph.getNodeById(Number(segments[i]));
-                if (!node) return null;
-                if (i < segments.length - 1) {
-                    if (!node.subgraph) return null;
-                    currentGraph = node.subgraph;
-                }
-            }
-            return node;
         };
 
         // ── Follow Execution ───────────────────────────────────────────

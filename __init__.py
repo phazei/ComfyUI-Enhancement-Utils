@@ -6,6 +6,7 @@ A curated collection of enhancement utilities for ComfyUI, combining and
 improving features from several community packages:
 
 - **Resource Monitor**: Real-time CPU/RAM/HDD/GPU stats in the menu bar.
+- **Node Profiler**: Per-node execution time badges with subgraph support.
 - **ImageLoadWithMetadata**: Image loader with subfolder support and metadata extraction.
 - **PlaySound**: Play a sound when a workflow step (or the whole queue) completes.
 - **SystemNotification**: Browser notification on workflow completion.
@@ -21,6 +22,9 @@ from .nodes import ALL_NODES
 # Import monitor to start the background stats collector and register HTTP routes.
 from . import monitor  # noqa: F401
 from .monitor import routes  # noqa: F401
+
+# Import profiler to install execution-timing hooks.
+from . import profiler  # noqa: F401
 
 
 class EnhancementUtilsExtension(ComfyExtension):
