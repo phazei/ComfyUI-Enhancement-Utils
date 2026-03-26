@@ -109,6 +109,129 @@ function getGraphBottom(nodes) {
     return maxY;
 }
 
+/**
+ * Position subgraph IO nodes to the left and right of all arranged nodes.
+ * No-op if the graph is not a subgraph (i.e., no inputNode/outputNode).
+ *
+ * Subgraph IO nodes are special Positionable items that represent the parent
+ * node's input/output slots. They are NOT in graph._nodes -- they live as
+ * graph.inputNode (id=-10) and graph.outputNode (id=-20).
+ */
+function positionSubgraphIO(graph) {
+    if (!graph.inputNode || !graph.outputNode) return;
+
+    const nodes = graph._nodes || [];
+    if (nodes.length === 0) return;
+
+    const bounds = getNodesBounds(nodes);
+    const centerY = (bounds.minY + bounds.maxY) / 2;
+
+    const inputIO = graph.inputNode;
+    const outputIO = graph.outputNode;
+    const inputW = inputIO.size?.[0] || 100;
+    const inputH = inputIO.size?.[1] || 100;
+    const outputH = outputIO.size?.[1] || 100;
+
+    const IO_GAP = 500;
+
+    // Position input IO to the left of all nodes.
+    inputIO.pos[0] = bounds.minX - IO_GAP - inputW;
+    inputIO.pos[1] = centerY - inputH / 2;
+
+    // Position output IO to the right of all nodes.
+    outputIO.pos[0] = bounds.maxX + IO_GAP;
+    outputIO.pos[1] = centerY - outputH / 2;
+
+    // Re-layout internal slots after repositioning.
+    if (typeof inputIO.arrange === "function") inputIO.arrange();
+    if (typeof outputIO.arrange === "function") outputIO.arrange();
+}
+
+/**
+ * Shift subgraph IO nodes by a delta. No-op if not a subgraph.
+ */
+function shiftSubgraphIO(graph, dx, dy) {
+    if (!graph.inputNode || !graph.outputNode) return;
+    graph.inputNode.pos[0] += dx;
+    graph.inputNode.pos[1] += dy;
+    graph.outputNode.pos[0] += dx;
+    graph.outputNode.pos[1] += dy;
+}
+
+/**
+ * Compute the centroid (center of mass) of a set of nodes.
+ * Uses each node's visual center (accounting for title bar).
+ * Returns {x: 0, y: 0} for empty arrays.
+ */
+function computeCentroid(nodes) {
+    if (nodes.length === 0) return { x: 0, y: 0 };
+    const titleH = TITLE_HEIGHT();
+    let sumX = 0, sumY = 0;
+    for (const node of nodes) {
+        sumX += node.pos[0] + node.size[0] / 2;
+        sumY += node.pos[1] - titleH / 2 + node.size[1] / 2;
+    }
+    return { x: sumX / nodes.length, y: sumY / nodes.length };
+}
+
+/**
+ * Shift all nodes and groups in the graph so the centroid is at (0, 0).
+ * Subgraph IO nodes are repositioned to flank the centered nodes.
+ */
+function centerGraph(graph) {
+    const nodes = graph._nodes || [];
+    const groups = graph._groups || [];
+    if (nodes.length === 0) return;
+
+    const center = computeCentroid(nodes);
+    const dx = -center.x;
+    const dy = -center.y;
+
+    for (const node of nodes) { node.pos[0] += dx; node.pos[1] += dy; }
+    for (const group of groups) { group.pos = [group.pos[0] + dx, group.pos[1] + dy]; }
+    positionSubgraphIO(graph);
+
+    if (typeof graph.change === "function") graph.change();
+    graph.setDirtyCanvas(true, true);
+}
+
+/**
+ * Wrapper that preserves the centroid position across a layout operation.
+ *
+ * 1. Captures the centroid of all nodes before layout.
+ * 2. Runs the layout function (sync or async).
+ * 3. Shifts everything so the new centroid matches the old one.
+ *
+ * If the graph was empty before layout, no shift is applied (layout starts at origin).
+ */
+async function withPreservedCenter(graph, layoutFn) {
+    const nodesBefore = graph._nodes || [];
+    const hadNodes = nodesBefore.length > 0;
+    const oldCenter = hadNodes ? computeCentroid(nodesBefore) : { x: 0, y: 0 };
+
+    // Run the layout (may be async for ELK).
+    await layoutFn();
+
+    // If there were no nodes before, skip shifting (layout places at origin).
+    if (!hadNodes) return;
+
+    const nodesAfter = graph._nodes || [];
+    if (nodesAfter.length === 0) return;
+
+    const newCenter = computeCentroid(nodesAfter);
+    const dx = oldCenter.x - newCenter.x;
+    const dy = oldCenter.y - newCenter.y;
+
+    // Skip if the shift is negligible.
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+
+    for (const node of nodesAfter) { node.pos[0] += dx; node.pos[1] += dy; }
+    for (const group of graph._groups || []) {
+        group.pos = [group.pos[0] + dx, group.pos[1] + dy];
+    }
+    shiftSubgraphIO(graph, dx, dy);
+}
+
 /** Get the bounding box of positioned nodes. */
 function getNodesBounds(nodes) {
     const titleH = TITLE_HEIGHT();
@@ -553,6 +676,7 @@ function arrangeFloatRightGroups(graph) {
         ...topLevelGroups.flatMap((g) => groupNodesMap.get(g) || []),
     ];
     layoutDisconnectedNodes(disconnected, getGraphBottom(allPositioned));
+    positionSubgraphIO(graph);
 
     if (typeof graph.change === "function") graph.change();
     graph.setDirtyCanvas(true, true);
@@ -740,6 +864,7 @@ function arrangeDagreGroups(graph) {
         ...topLevelGroups.flatMap((g) => groupNodesMap.get(g) || []),
     ];
     layoutDisconnectedNodes(disconnected, getGraphBottom(allPositioned));
+    positionSubgraphIO(graph);
 
     if (typeof graph.change === "function") graph.change();
     graph.setDirtyCanvas(true, true);
@@ -965,6 +1090,7 @@ async function arrangeELK(graph) {
     }
 
     layoutDisconnectedNodes(disconnected, getGraphBottom(connected));
+    positionSubgraphIO(graph);
     if (typeof graph.change === "function") graph.change();
     graph.setDirtyCanvas(true, true);
 }
@@ -1028,16 +1154,24 @@ app.registerExtension({
                 submenu: {
                     options: [
                         {
+                            content: "Center Graph (shift to 0,0)",
+                            callback: () => centerGraph(app.canvas.graph),
+                        },
+                        null, // separator
+                        {
                             content: "Quick (column aligned)",
-                            callback: () => arrangeFloatRightGroups(app.graph),
+                            callback: () => withPreservedCenter(app.canvas.graph,
+                                () => arrangeFloatRightGroups(app.canvas.graph)),
                         },
                         {
                             content: "Smart (dagre)",
-                            callback: () => arrangeDagreGroups(app.graph),
+                            callback: () => withPreservedCenter(app.canvas.graph,
+                                () => arrangeDagreGroups(app.canvas.graph)),
                         },
                         {
                             content: "Advanced (ELK)",
-                            callback: () => arrangeELK(app.graph),
+                            callback: () => withPreservedCenter(app.canvas.graph,
+                                () => arrangeELK(app.canvas.graph)),
                         },
                     ],
                 },
