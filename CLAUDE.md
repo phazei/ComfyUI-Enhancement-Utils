@@ -63,6 +63,8 @@ This is NOT a kitchen-sink package. Features are included because they fill real
 - Stats pushed via WebSocket: `server.PromptServer.instance.send_sync("enhutils.monitor", data)`
 - HTTP routes registered via `@server.PromptServer.instance.routes.patch(...)` decorators
 - GPU monitoring: `pynvml` is optional, every single pynvml call is wrapped in try/except
+- **Non-NVIDIA fallback**: when pynvml is missing or reports 0 devices, `GPUMonitor._init_torch_fallback()` reports VRAM only for ComfyUI's torch device via `comfy.model_management` (`get_total_memory` / `get_free_memory`), covering AMD ROCm, ZLUDA and Intel XPU. Skipped for CPU/MPS/DirectML, which report system RAM or a placeholder. `get_gpu_list()` marks these devices `vram_only: true`; the frontend uses that to skip creating the utilization/temp/power bars, their hover registration (`registerBarHover` would throw on an undefined bar) and their settings toggles
+- Note `get_free_memory()` counts torch's cached-but-unused memory as free, so the fallback VRAM number tracks what ComfyUI can allocate, not what the OS reports
 - GPU names decoded with `errors='replace'` (some drivers return non-UTF-8)
 - Power draw via `pynvml.nvmlDeviceGetPowerUsage()` / `nvmlDeviceGetEnforcedPowerLimit()` (milliwatts, divide by 1000)
 - **History** stored in-memory on `MonitorCollector.history` (dict of metric key -> list of `{t, v}` dicts). Survives browser refresh, lost on ComfyUI restart. Endpoints: `GET /enhutils/monitor/history`, `POST /enhutils/monitor/history/clear`
@@ -202,7 +204,7 @@ To block downstream execution *silently* from a V3 node, the blocker must be a p
 |---------|----------|-------|
 | `psutil` | Yes | System monitoring |
 | `piexif` | Yes | WebP EXIF extraction (lightweight) |
-| `pynvml` | Optional | NVIDIA GPU monitoring -- graceful fallback if missing |
+| `nvidia-ml-py` | Optional | NVIDIA GPU monitoring -- provides the `pynvml` module; graceful fallback if missing. (The PyPI package literally named `pynvml` is a deprecated shim -- point users to `nvidia-ml-py`.) |
 | `Pillow`, `torch`, `numpy` | Yes | Bundled with ComfyUI |
 
 Vendored JS libraries (in `js/lib/`, no npm needed):

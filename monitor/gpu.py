@@ -2,14 +2,16 @@
 GPU monitoring abstraction layer.
 
 Provides GPU utilization, VRAM usage, temperature, and power draw via pynvml (NVIDIA).
-Gracefully degrades to a no-op if pynvml is unavailable, the system has no
-NVIDIA GPU, or ZLUDA is detected (AMD GPUs faking CUDA).
+When pynvml is unavailable or reports no devices (AMD ROCm, ZLUDA, Intel XPU,
+missing nvidia-ml-py), falls back to VRAM-only monitoring of ComfyUI's torch
+device through comfy.model_management. Degrades to a no-op on CPU/MPS/DirectML.
 
 Improvements over Crystools:
 - All pynvml calls wrapped in try/except (no crashes on malformed data).
 - GPU names decoded with errors='replace' (no UnicodeDecodeError).
 - Functional ZLUDA detection (tests deviceGetCount, not string matching).
 - Respects CUDA_VISIBLE_DEVICES environment variable.
+- VRAM bar for non-NVIDIA GPUs via torch.
 """
 
 import logging
@@ -46,7 +48,7 @@ class GPUInfo:
 
 
 class GPUMonitor:
-    """Monitors NVIDIA GPU(s) via pynvml. No-op on unsupported systems."""
+    """Monitors NVIDIA GPU(s) via pynvml, or VRAM only via torch. No-op on unsupported systems."""
 
     def __init__(self):
         self._available = False
@@ -55,6 +57,9 @@ class GPUMonitor:
         self._visible_indices: list[int] | None = None
         self._pynvml = None
 
+        # Set when pynvml is unusable but torch exposes a VRAM-reporting device.
+        self._torch_device = None
+
         # Switches for which metrics to collect (toggled per-GPU via API).
         self.gpu_utilization_enabled: list[bool] = []
         self.gpu_vram_enabled: list[bool] = []
@@ -62,6 +67,8 @@ class GPUMonitor:
         self.gpu_power_enabled: list[bool] = []
 
         self._init_pynvml()
+        if not self._available:
+            self._init_torch_fallback()
 
     def _init_pynvml(self):
         """Try to initialize pynvml. Silently disable if unavailable."""
@@ -133,6 +140,71 @@ class GPUMonitor:
                 pass
             self._pynvml = None
 
+    def _init_torch_fallback(self):
+        """Report VRAM for ComfyUI's torch device when pynvml gives us nothing.
+
+        Covers AMD ROCm, ZLUDA and Intel XPU, which all expose memory through
+        torch but have no cross-platform utilization/temperature/power API.
+        model_management handles the per-backend differences and CPU/MPS/
+        DirectML, which report system RAM or a placeholder -- skipped here
+        since the RAM bar already covers that.
+        """
+        try:
+            import comfy.model_management as mm
+            device = mm.get_torch_device()
+            if device.type in ("cpu", "mps") or mm.is_directml_enabled():
+                return
+            total = mm.get_total_memory(device)
+            if total <= 0:
+                return
+            name = self._torch_device_name(device)
+        except Exception as e:
+            logger.info(f"No torch VRAM fallback available ({e}). GPU monitoring disabled.")
+            return
+
+        self._torch_device = device
+        self._gpu_names.append(name)
+        self.gpu_utilization_enabled.append(False)
+        self.gpu_vram_enabled.append(True)
+        self.gpu_temperature_enabled.append(False)
+        self.gpu_power_enabled.append(False)
+        self._available = True
+        logger.info(f"Monitoring VRAM only (no NVML) on {device}: {name}")
+
+    @staticmethod
+    def _torch_device_name(device) -> str:
+        """Plain device name, e.g. 'AMD Radeon RX 7900 XTX'.
+
+        model_management's version adds the device index and allocator backend,
+        which is noisy next to the NVML names used elsewhere.
+        """
+        try:
+            import torch
+            backend = getattr(torch, device.type, None)  # torch.cuda, torch.xpu, ...
+            return backend.get_device_name(device)
+        except Exception:
+            return str(device)
+
+    def _get_torch_stats(self) -> GPUInfo:
+        """VRAM stats for the torch fallback device."""
+        stats = GPUStats(index=0, name=self._gpu_names[0])
+
+        if self.gpu_vram_enabled[0]:
+            try:
+                import comfy.model_management as mm
+                total = mm.get_total_memory(self._torch_device)
+                # Counts torch's cached-but-unused memory as free, so this
+                # tracks what ComfyUI can actually allocate rather than what
+                # the OS reports as in use.
+                free = mm.get_free_memory(self._torch_device)
+                stats.vram_total = total
+                stats.vram_used = max(0, total - free)
+                stats.vram_used_percent = (stats.vram_used / total * 100) if total > 0 else 0.0
+            except Exception:
+                pass
+
+        return GPUInfo(device_type=self._torch_device.type, gpus=[stats])
+
     @staticmethod
     def _parse_visible_devices(total_count: int) -> list[int] | None:
         """Parse the CUDA_VISIBLE_DEVICES environment variable.
@@ -163,19 +235,27 @@ class GPUMonitor:
 
     @property
     def device_count(self) -> int:
-        return len(self._handles)
+        return len(self._gpu_names)
 
     def get_gpu_list(self) -> list[dict]:
-        """Return a list of {index, name} dicts for all monitored GPUs."""
+        """Return a list of {index, name, vram_only} dicts for all monitored GPUs.
+
+        vram_only is True for the torch fallback, where utilization, temperature
+        and power are unavailable and the frontend should skip those bars.
+        """
+        vram_only = self._torch_device is not None
         return [
-            {"index": i, "name": self._gpu_names[i]}
-            for i in range(len(self._handles))
+            {"index": i, "name": name, "vram_only": vram_only}
+            for i, name in enumerate(self._gpu_names)
         ]
 
     def get_stats(self) -> GPUInfo:
         """Collect current stats for all monitored GPUs."""
         if not self._available:
             return GPUInfo(device_type="cpu")
+
+        if self._torch_device is not None:
+            return self._get_torch_stats()
 
         pynvml = self._pynvml
         gpus = []
@@ -229,6 +309,7 @@ class GPUMonitor:
 
     def shutdown(self):
         """Clean up pynvml resources."""
+        self._torch_device = None
         if self._pynvml:
             try:
                 self._pynvml.nvmlShutdown()

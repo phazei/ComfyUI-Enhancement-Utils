@@ -264,25 +264,30 @@ app.registerExtension({
             const idx = gpu.index;
             const suffix = gpuList.length > 1 ? ` ${idx}` : "";
 
-            // GPU utilization bar.
-            const gpuBar = createMonitorBar("gpu", `GPU${suffix}`);
-            bars[`gpu_${idx}`] = gpuBar;
-            root.appendChild(gpuBar.element);
+            // Non-NVML devices (AMD, Intel) only report VRAM.
+            if (!gpu.vram_only) {
+                // GPU utilization bar.
+                const gpuBar = createMonitorBar("gpu", `GPU${suffix}`);
+                bars[`gpu_${idx}`] = gpuBar;
+                root.appendChild(gpuBar.element);
+            }
 
             // VRAM bar.
             const vramBar = createMonitorBar("vram", `VRAM${suffix}`);
             bars[`vram_${idx}`] = vramBar;
             root.appendChild(vramBar.element);
 
-            // Temperature bar.
-            const tempBar = createMonitorBar("temp", `Temp${suffix}`);
-            bars[`temp_${idx}`] = tempBar;
-            root.appendChild(tempBar.element);
+            if (!gpu.vram_only) {
+                // Temperature bar.
+                const tempBar = createMonitorBar("temp", `Temp${suffix}`);
+                bars[`temp_${idx}`] = tempBar;
+                root.appendChild(tempBar.element);
 
-            // Power bar.
-            const powerBar = createMonitorBar("power", `Pwr${suffix}`);
-            bars[`power_${idx}`] = powerBar;
-            root.appendChild(powerBar.element);
+                // Power bar.
+                const powerBar = createMonitorBar("power", `Pwr${suffix}`);
+                bars[`power_${idx}`] = powerBar;
+                root.appendChild(powerBar.element);
+            }
 
             maxVramUsed[idx] = 0;
         }
@@ -556,24 +561,32 @@ app.registerExtension({
             const idx = gpu.index;
             const suffix = gpuList.length > 1 ? ` ${idx}` : "";
 
-            registerBarHover(`gpu_${idx}`, bars[`gpu_${idx}`], {
-                color: BAR_COLORS.gpu, label: `GPU${suffix}`, unit: "%", yMax: 100, getExtra: null,
-            });
+            // Registration order sets the order of charts in the pinned popup,
+            // so it follows the DOM order of the bars created above.
+            if (!gpu.vram_only) {
+                registerBarHover(`gpu_${idx}`, bars[`gpu_${idx}`], {
+                    color: BAR_COLORS.gpu, label: `GPU${suffix}`, unit: "%", yMax: 100, getExtra: null,
+                });
+            }
+
             registerBarHover(`vram_${idx}`, bars[`vram_${idx}`], {
                 color: BAR_COLORS.vram, label: `VRAM${suffix}`, unit: "%", yMax: 100, getExtra: null,
             });
-            registerBarHover(`temp_${idx}`, bars[`temp_${idx}`], {
-                color: BAR_COLORS.temp, label: `Temp${suffix}`, unit: "\u00B0", yMax: 100, getExtra: null,
-            });
 
-            // Power bar hover shows cost info as extra line.
-            registerBarHover(`power_${idx}`, bars[`power_${idx}`], {
-                color: BAR_COLORS.power,
-                label: `Power${suffix}`,
-                unit: "W",
-                yMax: 600,  // Will be updated dynamically from TDP.
-                getExtra: getCostString,
-            });
+            if (!gpu.vram_only) {
+                registerBarHover(`temp_${idx}`, bars[`temp_${idx}`], {
+                    color: BAR_COLORS.temp, label: `Temp${suffix}`, unit: "\u00B0", yMax: 100, getExtra: null,
+                });
+
+                // Power bar hover shows cost info as extra line.
+                registerBarHover(`power_${idx}`, bars[`power_${idx}`], {
+                    color: BAR_COLORS.power,
+                    label: `Power${suffix}`,
+                    unit: "W",
+                    yMax: 600,  // Will be updated dynamically from TDP.
+                    getExtra: getCostString,
+                });
+            }
         }
 
         // ── Position in menu bar ───────────────────────────────────────
@@ -812,43 +825,47 @@ app.registerExtension({
 
             gpuEnabled[idx] = { gpu: true, vram: true, temp: true, power: true };
 
-            app.ui.settings.addSetting({
-                id: `EnhUtils.Monitor.ShowPower${idx}`,
-                name: `Resource Monitor - Show Power${suffix}`,
-                type: "boolean",
-                defaultValue: true,
-                onChange: async (value) => {
-                    gpuEnabled[idx].power = value;
-                    if (!value && bars[`power_${idx}`]) {
-                        updateMonitorBar(bars[`power_${idx}`], `Pwr${suffix}`, -1);
-                    }
-                    try {
-                        await api.fetchApi(`${API_BASE}/gpu/${idx}`, {
-                            method: "PATCH",
-                            body: JSON.stringify({ power: value }),
-                        });
-                    } catch (e) { /* ignore */ }
-                },
-            });
+            // VRAM-only devices (AMD, Intel) have no utilization/temp/power,
+            // so only the VRAM toggle below is registered for them.
+            if (!gpu.vram_only) {
+                app.ui.settings.addSetting({
+                    id: `EnhUtils.Monitor.ShowPower${idx}`,
+                    name: `Resource Monitor - Show Power${suffix}`,
+                    type: "boolean",
+                    defaultValue: true,
+                    onChange: async (value) => {
+                        gpuEnabled[idx].power = value;
+                        if (!value && bars[`power_${idx}`]) {
+                            updateMonitorBar(bars[`power_${idx}`], `Pwr${suffix}`, -1);
+                        }
+                        try {
+                            await api.fetchApi(`${API_BASE}/gpu/${idx}`, {
+                                method: "PATCH",
+                                body: JSON.stringify({ power: value }),
+                            });
+                        } catch (e) { /* ignore */ }
+                    },
+                });
 
-            app.ui.settings.addSetting({
-                id: `EnhUtils.Monitor.ShowTemp${idx}`,
-                name: `Resource Monitor - Show Temperature${suffix}`,
-                type: "boolean",
-                defaultValue: true,
-                onChange: async (value) => {
-                    gpuEnabled[idx].temp = value;
-                    if (!value && bars[`temp_${idx}`]) {
-                        updateMonitorBar(bars[`temp_${idx}`], `Temp${suffix}`, -1);
-                    }
-                    try {
-                        await api.fetchApi(`${API_BASE}/gpu/${idx}`, {
-                            method: "PATCH",
-                            body: JSON.stringify({ temperature: value }),
-                        });
-                    } catch (e) { /* ignore */ }
-                },
-            });
+                app.ui.settings.addSetting({
+                    id: `EnhUtils.Monitor.ShowTemp${idx}`,
+                    name: `Resource Monitor - Show Temperature${suffix}`,
+                    type: "boolean",
+                    defaultValue: true,
+                    onChange: async (value) => {
+                        gpuEnabled[idx].temp = value;
+                        if (!value && bars[`temp_${idx}`]) {
+                            updateMonitorBar(bars[`temp_${idx}`], `Temp${suffix}`, -1);
+                        }
+                        try {
+                            await api.fetchApi(`${API_BASE}/gpu/${idx}`, {
+                                method: "PATCH",
+                                body: JSON.stringify({ temperature: value }),
+                            });
+                        } catch (e) { /* ignore */ }
+                    },
+                });
+            }
 
             app.ui.settings.addSetting({
                 id: `EnhUtils.Monitor.ShowVram${idx}`,
@@ -869,24 +886,26 @@ app.registerExtension({
                 },
             });
 
-            app.ui.settings.addSetting({
-                id: `EnhUtils.Monitor.ShowGpu${idx}`,
-                name: `Resource Monitor - Show GPU${suffix} utilization`,
-                type: "boolean",
-                defaultValue: true,
-                onChange: async (value) => {
-                    gpuEnabled[idx].gpu = value;
-                    if (!value && bars[`gpu_${idx}`]) {
-                        updateMonitorBar(bars[`gpu_${idx}`], `GPU${suffix}`, -1);
-                    }
-                    try {
-                        await api.fetchApi(`${API_BASE}/gpu/${idx}`, {
-                            method: "PATCH",
-                            body: JSON.stringify({ utilization: value }),
-                        });
-                    } catch (e) { /* ignore */ }
-                },
-            });
+            if (!gpu.vram_only) {
+                app.ui.settings.addSetting({
+                    id: `EnhUtils.Monitor.ShowGpu${idx}`,
+                    name: `Resource Monitor - Show GPU${suffix} utilization`,
+                    type: "boolean",
+                    defaultValue: true,
+                    onChange: async (value) => {
+                        gpuEnabled[idx].gpu = value;
+                        if (!value && bars[`gpu_${idx}`]) {
+                            updateMonitorBar(bars[`gpu_${idx}`], `GPU${suffix}`, -1);
+                        }
+                        try {
+                            await api.fetchApi(`${API_BASE}/gpu/${idx}`, {
+                                method: "PATCH",
+                                body: JSON.stringify({ utilization: value }),
+                            });
+                        } catch (e) { /* ignore */ }
+                    },
+                });
+            }
         }
 
         // ── Disk ───────────────────────────────────────────────────────

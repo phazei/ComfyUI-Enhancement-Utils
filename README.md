@@ -31,10 +31,11 @@ Real-time system stats displayed as horizontal colored bars in the ComfyUI menu 
 **History persists through browser refresh** -- data is stored server-side in memory. Choose a display window (5 / 10 / 20 / 30 min, 1 hr, or Unlimited). Right-click the monitor bars to clear history.
 
 **GPU support:**
-- NVIDIA GPUs via optional `pynvml`
-- Graceful fallback if no NVIDIA GPU or `pynvml` not installed
+- NVIDIA GPUs report utilization, VRAM, temperature and power via optional `nvidia-ml-py`
+- AMD (ROCm/ZLUDA) and Intel (XPU) GPUs show a VRAM bar only -- utilization, temperature and power have no cross-platform API, so those bars are not shown
 - Respects `CUDA_VISIBLE_DEVICES` -- only monitors GPUs ComfyUI can use
 - Safe ZLUDA detection (won't crash on AMD GPUs faking CUDA)
+- Falls back to CPU/RAM/disk only if no GPU is usable
 
 
 ---
@@ -293,11 +294,13 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-For NVIDIA GPU monitoring (optional):
+For NVIDIA GPU monitoring (optional; usually already present since PyTorch pulls it in):
 
 ```bash
-pip install pynvml
+pip install nvidia-ml-py
 ```
+
+`nvidia-ml-py` is NVIDIA's official package and provides the `pynvml` module. The separate `pynvml` package on PyPI is a deprecated shim that just depends on `nvidia-ml-py` and prints a `FutureWarning` -- don't install that one.
 
 ---
 
@@ -307,7 +310,7 @@ pip install pynvml
 |---------|----------|---------|
 | `psutil` | Yes | CPU, RAM, and disk monitoring |
 | `piexif` | Yes | WebP EXIF metadata extraction |
-| `pynvml` | Optional | NVIDIA GPU monitoring (graceful fallback if missing) |
+| `nvidia-ml-py` | Optional | NVIDIA GPU monitoring via the `pynvml` module (graceful fallback if missing) |
 | `Pillow` | Yes (bundled with ComfyUI) | Image loading |
 | `torch`, `numpy` | Yes (bundled with ComfyUI) | Tensor operations |
 
