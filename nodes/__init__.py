@@ -9,6 +9,7 @@ from .system_notification import SystemNotification
 from .image_load_subfolders import ImageLoadWithSubfolders
 from .profiler_timing import ProfilerTiming
 from .parse_json import ParseJSON
+from .execution_gate import ExecutionGate
 
 ALL_NODES = [
     PlaySound,
@@ -16,4 +17,5 @@ ALL_NODES = [
     ImageLoadWithSubfolders,
     ProfilerTiming,
     ParseJSON,
+    ExecutionGate,
 ]

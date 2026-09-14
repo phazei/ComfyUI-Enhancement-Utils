@@ -248,6 +248,30 @@ Parses a JSON string into a native Python object (list, dict, number, etc.) so i
 
 ---
 
+### Execution Gate (EnhUtils)
+
+**Category: utils** | **Node: Execution Gate (EnhUtils)**
+
+A conditional pass-through that stops the rest of a branch from running when a boolean is false -- without erroring, and without forcing its own upstream to run. Typical use: an LLM generates text, a length/range check reduces it to a boolean, and the gate sits between the text and an expensive generator. Bad text skips the generator; the queue continues normally (auto-queue / "Run (Instant)" is not interrupted).
+
+| Input | Type | Description |
+|-------|------|-------------|
+| enabled | Boolean | `true` passes `value` through. `false` blocks. Connect a computed boolean or toggle it manually. |
+| value | Any (lazy, type-matched) | The value to pass through. **Only evaluated when `enabled` is true** -- when false, the nodes feeding it do not run. |
+
+| Output | Type | Description |
+|--------|------|-------------|
+| value | Same as input | The original value when enabled, or a silent execution blocker when disabled. Downstream nodes are skipped, not errored. |
+
+Because a silent block looks the same as any other reason a branch didn't run, the gate announces itself when it blocks: a warning toast in the UI ("Execution Gate: blocked") and an INFO line in the server console. Neither affects execution or stops auto-queue.
+
+How it differs from Impact Pack's **Control Bridge** (Stop mode):
+- **Not an output node.** Control Bridge is, which makes ComfyUI treat everything upstream of it as required -- so the LLM ran on every queue even when its text was discarded or disconnected. The gate is pruned like any normal node: if its output does not reach a real output, neither the gate nor anything feeding it executes.
+- **Lazy `value`.** When `enabled` is false the `value` input is never requested, so its upstream nodes are skipped rather than executed and discarded.
+- Uses only ComfyUI's native lazy-input and `ExecutionBlocker` mechanisms -- no mute/bypass manipulation, no node-ID lookups -- so it works unchanged inside subgraphs.
+
+---
+
 ## Installation
 
 ### ComfyUI Manager
@@ -305,7 +329,9 @@ ComfyUI-Enhancement-Utils/
 │   ├── play_sound.py              # PlaySound node
 │   ├── system_notification.py     # SystemNotification node
 │   ├── image_load_subfolders.py   # ImageLoadWithSubfolders node
-│   └── profiler_timing.py         # ProfilerTiming node
+│   ├── profiler_timing.py         # ProfilerTiming node
+│   ├── parse_json.py              # ParseJSON node
+│   └── execution_gate.py          # ExecutionGate node (lazy conditional pass-through)
 │
 ├── monitor/
 │   ├── collector.py               # Background stats polling thread
@@ -330,6 +356,7 @@ ComfyUI-Enhancement-Utils/
         ├── nodeProfiler.js            # Execution time badges (both renderers)
         ├── playSound.js               # PlaySound client handler
         ├── systemNotification.js      # Browser Notification handler
+        ├── executionGate.js           # Toast when an Execution Gate blocks
         ├── resourceMonitor.js         # Monitor UI (bars, settings, cost tracking)
         ├── resourceMonitorGraph.js    # Historical graph popup (Canvas 2D)
         ├── resourceMonitor.css        # Monitor + popup + context menu styling

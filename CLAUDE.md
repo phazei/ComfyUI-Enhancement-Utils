@@ -150,6 +150,9 @@ The monitor runs in a daemon thread. Using `asyncio.run()` inside a thread can d
 
 History lists are appended from the daemon thread and read from HTTP handler threads. Python's GIL makes `list.append()` and `list(...)` copy thread-safe, so no explicit lock is needed for history access.
 
+### Silent ExecutionBlocker in V3 Nodes
+To block downstream execution *silently* from a V3 node, the blocker must be a positional result: `io.NodeOutput(ExecutionBlocker(None))`. The V3-native `io.NodeOutput(block_execution=msg)` treats `None` as "no block" (`execution.py` checks `is not None`), so it can only produce *noisy* blocks that emit `execution_error`. Returning a bare `ExecutionBlocker(None)` is worse: `EXECUTE_NORMALIZED` converts it to `NodeOutput(block_execution=None)` -- a no-op with no result at all. Noisy blocks also stop the frontend's auto-queue; silent ones do not. See `nodes/execution_gate.py`.
+
 ### Image Loading
 - `node_helpers.pillow()` wraps PIL operations to retry with `LOAD_TRUNCATED_IMAGES = True` on failure
 - `folder_paths.filter_files_content_types(files, ["image"])` filters by MIME type, works with relative paths
