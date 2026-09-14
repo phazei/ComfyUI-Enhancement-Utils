@@ -8,14 +8,28 @@
 
 /* ── Container ──────────────────────────────────────────────────────────── */
 
+/* The sizing rules below are deliberate workarounds for how the frontend's
+ * menu row lays out flex children. Full reasoning: CLAUDE.md, "Monitor Bar
+ * Layout in the Menu Row". Don't simplify them without reading that first.
+ * gap / padding / bar min-width are mirrored as constants in resourceMonitor.js. */
 #enhutils-monitor-root {
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
     align-items: stretch;  /* Bars stretch to match menu bar height. */
+    box-sizing: border-box;
     gap: 4px;
     padding: 0 4px;
+    min-height: 28px;      /* Row has no height of its own if no other extension adds menu buttons. */
+    flex: 1000000 1 0;     /* Basis 0 so the card can shrink to our min-width; huge grow so we, not sibling grow-1 groups, get the free space. */
+    /* min-width is set inline by JS so bars never wrap past MAX_ROWS rows. */
     user-select: none;
+}
+
+/* Legacy vertical .comfy-menu (Comfy.UseNewMenu = Disabled): main axis is
+ * vertical, so flex-basis 0 would collapse the height. JS adds this class. */
+#enhutils-monitor-root.enhutils-legacy-menu {
+    flex: 0 0 auto;
 }
 
 /* ── Individual Monitor Bar ─────────────────────────────────────────────── */
@@ -24,6 +38,7 @@
     display: flex;
     align-items: center;
     position: relative;
+    box-sizing: border-box;
     min-width: 60px;
     border-radius: 0.5rem;
     overflow: hidden;

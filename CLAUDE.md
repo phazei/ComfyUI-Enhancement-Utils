@@ -150,6 +150,14 @@ The monitor runs in a daemon thread. Using `asyncio.run()` inside a thread can d
 
 History lists are appended from the daemon thread and read from HTTP handler threads. Python's GIL makes `list.append()` and `list(...)` copy thread-safe, so no explicit lock is needed for history access.
 
+### Monitor Bar Layout in the Menu Row
+The monitor root is inserted into `app.menu.element` (`div.flex.gap-2.mx-2`, `width: fit-content`), a horizontal flex row inside the frontend's top-right action card. Three things about that row are easy to get wrong:
+- **Height comes from siblings.** `app.menu.element` has no height of its own; the root stretches to the tallest sibling button group. If no other extension adds legacy menu buttons, the row has zero content height and the bars collapse to a 1px border (GitHub #4/#6). The root carries `min-height: 28px` for this case -- on the root, not the bars, so wrapped rows still share the row height.
+- **Wrapping squashes rows.** The root is the only shrinkable item in the card, so flex will shrink it to one bar per row and split the ~40px row height across every wrapped row. JS sets `root.style.minWidth` from the visible bar count so it never wraps past `MAX_ROWS`.
+- **`flex-basis` must be 0.** Chromium's intrinsic min-content for the card uses each item's flex *base* size, not its `min-width`. With `flex-basis: auto` the card can't shrink below ~4 bars even when `min-width` allows 3, so it overflows the viewport early, and the shrink phase also shrinks the sibling `.comfyui-button-group`s (their `overflow: hidden` zeroes their auto min-width), clipping their buttons. Basis 0 fixes both -- the root just fills leftover space.
+- **`flex-grow` must be huge.** With basis 0 the root's whole width is "free space", and other extensions put `flex: 1 1 auto` items in the same row (rgthree's button group). Grow 1 splits that space 50/50 and the root gets stuck at its min-width; even 999 leaks ~0.4px, enough to wrap the last bar at the exact single-row width. Hence `flex: 1000000 1 0`. Verified in headless Chromium against a copy of the frontend DOM; do not "simplify" it.
+- The legacy `.comfy-menu` (`Comfy.UseNewMenu = Disabled`) is a vertical column, so `positionMonitor()` adds `.enhutils-legacy-menu` there to disable the above.
+
 ### Silent ExecutionBlocker in V3 Nodes
 To block downstream execution *silently* from a V3 node, the blocker must be a positional result: `io.NodeOutput(ExecutionBlocker(None))`. The V3-native `io.NodeOutput(block_execution=msg)` treats `None` as "no block" (`execution.py` checks `is not None`), so it can only produce *noisy* blocks that emit `execution_error`. Returning a bare `ExecutionBlocker(None)` is worse: `EXECUTE_NORMALIZED` converts it to `NodeOutput(block_execution=None)` -- a no-op with no result at all. Noisy blocks also stop the frontend's auto-queue; silent ones do not. See `nodes/execution_gate.py`.
 

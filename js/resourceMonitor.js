@@ -70,6 +70,24 @@ const DEFAULT_HISTORY_MINUTES = 5;
 /** Available history duration options (minutes; 0 = unlimited). */
 const HISTORY_DURATION_OPTIONS = [5, 10, 20, 30, 60, 0];
 
+/**
+ * Maximum rows the bars may wrap into when the menu is narrow. Wrapped rows
+ * split the ~40px menu row height, so more than 2 squashes the labels.
+ * Enforced via a computed min-width in updateRootMinWidth().
+ */
+const MAX_ROWS = 2;
+
+/**
+ * Root class for the legacy vertical .comfy-menu (Comfy.UseNewMenu = Disabled),
+ * where the row-oriented flex sizing and min-width don't apply.
+ */
+const LEGACY_MENU_CLASS = "enhutils-legacy-menu";
+
+/** Layout constants mirrored from resourceMonitor.css -- keep in sync. */
+const BAR_MIN_WIDTH = 60;   // .enhutils-monitor { min-width }
+const BAR_GAP = 4;          // #enhutils-monitor-root { gap }
+const ROOT_PADDING_X = 8;   // #enhutils-monitor-root { padding: 0 4px } -- both sides
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -148,6 +166,26 @@ function createMonitorBar(cssClass, label) {
 }
 
 /**
+ * Set the root's min-width so the visible bars never wrap past MAX_ROWS rows.
+ * Cleared in the legacy vertical menu. Called whenever a bar is shown/hidden.
+ *
+ * @param {HTMLElement|null} root - The #enhutils-monitor-root element.
+ */
+function updateRootMinWidth(root) {
+    if (!root) return;
+    let value = "";
+    if (!root.classList.contains(LEGACY_MENU_CLASS)) {
+        const visible = root.querySelectorAll(".enhutils-monitor:not(.hidden)").length;
+        const cols = Math.ceil(visible / MAX_ROWS);
+        const width = cols > 0
+            ? cols * BAR_MIN_WIDTH + (cols - 1) * BAR_GAP + ROOT_PADDING_X
+            : 0;
+        value = `${width}px`;
+    }
+    if (root.style.minWidth !== value) root.style.minWidth = value;
+}
+
+/**
  * Update a monitor bar with new data.
  *
  * @param {Object} bar - The bar refs from createMonitorBar().
@@ -157,11 +195,18 @@ function createMonitorBar(cssClass, label) {
  * @param {Object} [extra] - Optional extra data for tooltip: {used, total, maxUsed}.
  */
 function updateMonitorBar(bar, label, percent, symbol = "%", extra = null) {
+    const wasHidden = bar.element.classList.contains("hidden");
     if (percent < 0) {
-        bar.element.classList.add("hidden");
+        if (!wasHidden) {
+            bar.element.classList.add("hidden");
+            updateRootMinWidth(bar.element.parentElement);
+        }
         return;
     }
-    bar.element.classList.remove("hidden");
+    if (wasHidden) {
+        bar.element.classList.remove("hidden");
+        updateRootMinWidth(bar.element.parentElement);
+    }
 
     const pct = Math.min(100, Math.max(0, percent));
     bar.slider.style.width = `${pct}%`;
@@ -542,9 +587,13 @@ app.registerExtension({
             if (app.menu?.settingsGroup?.element) {
                 const target = app.menu.settingsGroup.element;
                 target.parentElement?.insertBefore(root, target);
+                root.classList.remove(LEGACY_MENU_CLASS);
+                updateRootMinWidth(root);
                 return;
             }
-            // Legacy: insert after the queue button.
+            // Legacy: insert after the queue button (vertical menu).
+            root.classList.add(LEGACY_MENU_CLASS);
+            updateRootMinWidth(root);
             const queueBtn = document.getElementById("queue-button");
             if (queueBtn?.parentElement) {
                 queueBtn.parentElement.insertBefore(root, queueBtn.nextSibling);
@@ -554,7 +603,8 @@ app.registerExtension({
             document.body.appendChild(root);
         };
 
-        // Position on load and reposition when menu type changes.
+        // Position on load and reposition when menu type changes. Also sets
+        // the initial min-width; updateMonitorBar() keeps it current.
         positionMonitor();
         api.addEventListener("Comfy.UseNewMenu", positionMonitor);
 
