@@ -17,10 +17,12 @@
     flex-direction: row;
     flex-wrap: wrap;
     align-items: stretch;  /* Bars stretch to match menu bar height. */
+    align-self: center !important;
     box-sizing: border-box;
     gap: 4px;
     padding: 0 4px;
-    min-height: 28px;      /* Row has no height of its own if no other extension adds menu buttons. */
+    height: 38px !important;
+    min-height: 38px !important;
     flex: 1000000 1 0;     /* Basis 0 so the card can shrink to our min-width; huge grow so we, not sibling grow-1 groups, get the free space. */
     /* min-width is set inline by JS so bars never wrap past MAX_ROWS rows. */
     user-select: none;
@@ -40,12 +42,14 @@
     position: relative;
     box-sizing: border-box;
     min-width: 60px;
+    /* Compatibility with ComfyUI Frontend 1.52+ fixed-height menu layout. */
+    height: 36px !important;
+    min-height: 36px !important;
     border-radius: 0.5rem;
     overflow: hidden;
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid rgba(255, 255, 255, 0.20);
     cursor: pointer;
-    /* No fixed height -- inherits from parent via align-items: stretch. */
 }
 
 /* Hidden monitors (disabled via settings). */
