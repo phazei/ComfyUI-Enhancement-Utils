@@ -16,6 +16,7 @@ import hashlib
 import json
 import fnmatch
 import os
+import re
 
 import numpy as np
 import torch
@@ -86,19 +87,129 @@ def _get_image_file_list() -> list[str]:
     return _scan_image_dir(folder_paths.get_input_directory())
 
 
+# ── Folder Allowlist ────────────────────────────────────────────────────────
+
+# Active allowlist file (gitignored). The repo ships ``allowed_folders.rename.txt``.
+ALLOWLIST_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "allowed_folders.txt")
+# Environment variable alternative: comma-separated root folders.
+ALLOWLIST_ENV = "ENHUTILS_ALLOWED_FOLDERS"
+
+# Cached parse of ALLOWLIST_FILE: (mtime, roots).
+_allowlist_file_cache: tuple[float, list[str]] | None = None
+
+
+class FolderNotAllowedError(ValueError):
+    """Raised when a folder is outside the configured allowlist."""
+
+
+def _is_within(path: str, base: str) -> bool:
+    """Return True if absolute *path* is *base* or inside it (case-insensitive on Windows).
+
+    ``os.path.commonpath`` raises on Windows when the paths are on different
+    drives; that simply means "not inside".
+    """
+    path, base = os.path.normcase(path), os.path.normcase(base)
+    try:
+        return os.path.commonpath((path, base)) == base
+    except ValueError:
+        return False
+
+
+def _canonical(path: str) -> str:
+    """Absolute, symlink/junction-resolved path. Relative paths resolve against the input directory."""
+    if not os.path.isabs(path):
+        path = os.path.join(folder_paths.get_input_directory(), path)
+    return os.path.realpath(path)
+
+
+def _file_roots() -> list[str] | None:
+    """Roots from ``allowed_folders.txt``, or None if the file doesn't exist.
+
+    Blank lines and ``#`` comments are ignored. An unreadable file yields
+    ``[]`` (input folder only) rather than unrestricted access. Re-read when
+    the file's mtime changes.
+    """
+    global _allowlist_file_cache
+    try:
+        mtime = os.path.getmtime(ALLOWLIST_FILE)
+    except FileNotFoundError:
+        _allowlist_file_cache = None
+        return None
+    except OSError:
+        return []
+
+    if _allowlist_file_cache and _allowlist_file_cache[0] == mtime:
+        return _allowlist_file_cache[1]
+
+    try:
+        with open(ALLOWLIST_FILE, encoding="utf-8-sig") as f:
+            lines = [line.strip() for line in f]
+    except OSError:
+        return []
+    roots = [_canonical(line) for line in lines if line and not line.startswith("#")]
+    _allowlist_file_cache = (mtime, roots)
+    return roots
+
+
+def _env_roots() -> list[str] | None:
+    """Roots from ``ENHUTILS_ALLOWED_FOLDERS``, or None if it isn't set."""
+    value = os.environ.get(ALLOWLIST_ENV)
+    if value is None:
+        return None
+    return [_canonical(part.strip()) for part in value.split(",") if part.strip()]
+
+
+def is_folder_allowed(resolved: str) -> bool:
+    """Check a resolved folder against the allowlist(s).
+
+    Each source (``allowed_folders.txt``, ``ENHUTILS_ALLOWED_FOLDERS``) that
+    is present must allow the folder; an absent source allows everything, an
+    empty one allows only the input directory. The input directory is always
+    allowed.
+    """
+    real = os.path.realpath(resolved)
+    if _is_within(real, os.path.realpath(folder_paths.get_input_directory())):
+        return True
+    for roots in (_file_roots(), _env_roots()):
+        if roots is not None and not any(_is_within(real, root) for root in roots):
+            return False
+    return True
+
+
 def _resolve_folder(folder_path: str) -> str:
     """Resolve a folder path to an absolute directory path.
 
     If *folder_path* is relative it is resolved against the ComfyUI input
-    directory. Raises :class:`ValueError` if the resolved path does not exist
-    or is not a directory.
+    directory. Raises :class:`FolderNotAllowedError` if the folder is outside
+    the allowlist, and :class:`ValueError` if it does not exist or is not a
+    directory.
     """
     if not os.path.isabs(folder_path):
         folder_path = os.path.join(folder_paths.get_input_directory(), folder_path)
-    folder_path = os.path.normpath(folder_path)
+    folder_path = os.path.abspath(folder_path)
+    if not is_folder_allowed(folder_path):
+        raise FolderNotAllowedError(
+            f"Folder not allowed: {folder_path} (see allowed_folders.txt / {ALLOWLIST_ENV} on the server)"
+        )
     if not os.path.isdir(folder_path):
         raise ValueError(f"Folder does not exist or is not a directory: {folder_path}")
     return folder_path
+
+
+def _resolve_folder_image(folder_path: str, folder_image: str) -> str:
+    """Resolve *folder_image* inside the custom folder, enforcing containment.
+
+    Raises :class:`ValueError` if the image path escapes the folder, and
+    :class:`FolderNotAllowedError` if its real location (after following
+    symlinked subfolders) is outside the allowlist. Existence is not checked.
+    """
+    base = _resolve_folder(folder_path)
+    image_path = os.path.abspath(os.path.join(base, folder_image))
+    if not _is_within(image_path, base):
+        raise ValueError(f"Image path escapes the folder: {folder_image}")
+    if not is_folder_allowed(os.path.dirname(os.path.realpath(image_path))):
+        raise FolderNotAllowedError(f"Folder not allowed: {os.path.dirname(os.path.realpath(image_path))}")
+    return image_path
 
 
 def _is_annotated_path(value: str) -> bool:
@@ -108,7 +219,6 @@ def _is_annotated_path(value: str) -> bool:
     ``clipspace/file.png [input]`` or ``file.png [temp]``.  These are
     produced by MaskEditor saves and "Paste (clipspace)" actions.
     """
-    import re
     return bool(value and re.search(r' \[[^\]]+\]$', value.strip()))
 
 
@@ -274,8 +384,7 @@ class ImageLoadWithSubfolders(io.ComfyNode):
             if _is_annotated_path(folder_image):
                 image_path = folder_paths.get_annotated_filepath(folder_image)
             else:
-                base = _resolve_folder(folder_path)
-                image_path = os.path.normpath(os.path.join(base, folder_image))
+                image_path = _resolve_folder_image(folder_path, folder_image)
                 if not os.path.isfile(image_path):
                     raise FileNotFoundError(
                         f"Image not found in custom folder: {folder_image} "
@@ -359,8 +468,7 @@ class ImageLoadWithSubfolders(io.ComfyNode):
             if _is_annotated_path(folder_image or ""):
                 image_path = folder_paths.get_annotated_filepath(folder_image)
             else:
-                base = _resolve_folder(folder_path)
-                image_path = os.path.normpath(os.path.join(base, folder_image))
+                image_path = _resolve_folder_image(folder_path, folder_image)
         else:
             image_path = folder_paths.get_annotated_filepath(image)
         m = hashlib.sha256()
@@ -387,10 +495,9 @@ class ImageLoadWithSubfolders(io.ComfyNode):
                     return f"Image not found: {folder_image}"
                 return True
             try:
-                base = _resolve_folder(folder_path)
+                resolved = _resolve_folder_image(folder_path, folder_image)
             except ValueError as exc:
                 return str(exc)
-            resolved = os.path.normpath(os.path.join(base, folder_image))
             if not os.path.isfile(resolved):
                 return f"Image not found in custom folder: {folder_image}"
             return True

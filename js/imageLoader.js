@@ -239,9 +239,13 @@ function forceWidgetReactiveUpdate(node, widget) {
  * Fetch the listing for a folder from the backend. Also (re-)registers the
  * folder server-side so its virtual ``/view`` subfolder can be served.
  *
+ * A folder outside the server's allowlist resolves to
+ * ``{ notAllowed: true, error }`` and is not cached.
+ *
  * @param {string} folderPath - Absolute or input-relative folder path.
  * @param {boolean} [bypassCache=false] - If true, skip the cache and re-fetch.
- * @returns {Promise<FolderListing|null>} The listing, or null on failure.
+ * @returns {Promise<FolderListing|{notAllowed: true, error: string}|null>}
+ *     The listing, a not-allowed marker, or null on other failures.
  */
 async function fetchFolderListing(folderPath, bypassCache = false) {
     if (!folderPath || !folderPath.trim()) return null;
@@ -255,6 +259,13 @@ async function fetchFolderListing(folderPath, bypassCache = false) {
         const resp = await api.fetchApi(
             `/enhutils/image_loader/list?path=${encodeURIComponent(key)}`
         );
+        if (resp.status === 403) {
+            const data = await resp.json().catch(() => ({}));
+            if (data.not_allowed) {
+                listCache.delete(key);
+                return { notAllowed: true, error: data.error ?? "Folder not allowed." };
+            }
+        }
         if (!resp.ok) {
             console.warn("[EnhancementUtils] ImageLoader: folder list request failed:", resp.status);
             return null;
@@ -632,8 +643,11 @@ function handleFolderImageChange(node, value) {
  *
  * @param {Object} node - The LiteGraph node instance.
  * @param {boolean} [bypassCache=false] - Force a fresh fetch.
+ * @param {boolean} [notify=false] - Show a toast if the folder is not
+ *     allowed. Only set for direct ``folder_path`` edits, so workflow loads
+ *     and global refreshes don't produce a burst of toasts.
  */
-async function refreshFolderCombo(node, bypassCache = false) {
+async function refreshFolderCombo(node, bypassCache = false, notify = false) {
     const folderPath = findWidget(node, "folder_path")?.value ?? "";
 
     if (!folderPath.trim()) {
@@ -642,6 +656,13 @@ async function refreshFolderCombo(node, bypassCache = false) {
     }
 
     const listing = await fetchFolderListing(folderPath, bypassCache);
+    if (listing?.notAllowed) {
+        console.warn("[EnhancementUtils] ImageLoader:", listing.error);
+        if (notify) showNotAllowedToast(folderPath);
+        applyImageList(node, []);
+        clearPreview(node);
+        return;
+    }
     applyImageList(node, listing?.images ?? []);
 
     const combo = findWidget(node, "folder_image");
@@ -650,6 +671,21 @@ async function refreshFolderCombo(node, bypassCache = false) {
     } else {
         clearPreview(node);
     }
+}
+
+/**
+ * Show a warning toast for a folder rejected by the server's allowlist.
+ *
+ * @param {string} folderPath - The rejected folder_path value.
+ */
+function showNotAllowedToast(folderPath) {
+    app.extensionManager?.toast?.add({
+        severity: "warn",
+        summary: "Folder not allowed",
+        detail: `"${folderPath.trim()}" is not in the server's allowed folders ` +
+            "(allowed_folders.txt / ENHUTILS_ALLOWED_FOLDERS).",
+        life: 6000,
+    });
 }
 
 /**
@@ -692,7 +728,7 @@ app.registerExtension({
                 listCache.delete((folderWidget._prevPath ?? "").trim());
                 folderWidget._prevPath = value;
                 syncWidgetVisibility(node, value);
-                refreshFolderCombo(node, /* bypassCache */ true);
+                refreshFolderCombo(node, /* bypassCache */ true, /* notify */ true);
             };
         }
 

@@ -17,8 +17,10 @@ copied or written. Folders inside the input directory don't need this at all;
 they are addressed with their real input-relative subfolder.
 
 Only folders registered through ``/list`` can be served, so a bare URL can't
-read arbitrary paths. ``/list`` itself accepts any folder, so this is not an
-access-control boundary -- do not expose the server to untrusted networks.
+read arbitrary paths. Which folders ``/list`` accepts is controlled by the
+allowlist (``allowed_folders.txt`` / ``ENHUTILS_ALLOWED_FOLDERS``, see
+``image_load_subfolders.is_folder_allowed``); without one, any folder is
+accepted. The allowlist is re-checked on every virtual ``/view`` request.
 """
 
 import hashlib
@@ -32,7 +34,13 @@ from PIL import Image
 import folder_paths
 import server
 
-from .image_load_subfolders import _resolve_folder, _scan_image_dir
+from .image_load_subfolders import (
+    FolderNotAllowedError,
+    _is_within,
+    _resolve_folder,
+    _scan_image_dir,
+    is_folder_allowed,
+)
 
 logger = logging.getLogger("enhutils.image_loader.routes")
 
@@ -41,18 +49,6 @@ VIRTUAL_PREFIX = "__enhutils__"
 
 # Registered custom folders: id -> resolved absolute path.
 _folder_registry: dict[str, str] = {}
-
-
-def _is_within(path: str, base: str) -> bool:
-    """Return True if absolute *path* is *base* or inside it.
-
-    ``os.path.commonpath`` raises on Windows when the paths are on different
-    drives; that simply means "not inside".
-    """
-    try:
-        return os.path.commonpath((path, base)) == base
-    except ValueError:
-        return False
 
 
 def _register_folder(resolved: str) -> str:
@@ -81,8 +77,9 @@ async def list_folder_images(request: web.Request) -> web.Response:
             input directory.
 
     Returns:
-        JSON ``{"path", "count", "images", "view_subfolder"}`` on success, or
-        a 400 error on invalid/missing path. ``view_subfolder`` is the
+        JSON ``{"path", "count", "images", "view_subfolder"}`` on success, a
+        403 ``{"error", "not_allowed": true}`` if the folder is outside the
+        allowlist, or a 400 error on invalid/missing path. ``view_subfolder`` is the
         subfolder (relative to ``type=input``) to prefix image paths with when
         addressing them via ``/view``.
     """
@@ -92,6 +89,8 @@ async def list_folder_images(request: web.Request) -> web.Response:
 
     try:
         resolved = os.path.abspath(_resolve_folder(folder_path))
+    except FolderNotAllowedError as exc:
+        return web.json_response({"error": str(exc), "not_allowed": True}, status=403)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -176,5 +175,10 @@ def serve_virtual_view(subfolder: str, filename: str, query) -> web.StreamRespon
     file = os.path.abspath(os.path.join(base, rel, os.path.basename(filename)))
     if not _is_within(file, base) or not os.path.isfile(file):
         return web.Response(status=404)
+    # Re-check the allowlist (it may have changed since /list registered the
+    # folder) against the file's real location, since symlinked subfolders
+    # may point elsewhere.
+    if not is_folder_allowed(os.path.dirname(os.path.realpath(file))):
+        return web.Response(status=403)
 
     return _image_response(file, query)

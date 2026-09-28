@@ -167,6 +167,8 @@ To block downstream execution *silently* from a V3 node, the blocker must be a p
 - `node_helpers.pillow()` wraps PIL operations to retry with `LOAD_TRUNCATED_IMAGES = True` on failure
 - `folder_paths.filter_files_content_types(files, ["image"])` filters by MIME type, works with relative paths
 - `folder_paths.get_annotated_filepath(image)` handles subfolder-style paths like `sub/image.png` correctly
+- Custom-folder previews/MaskEditor: the JS mirrors `folder_image` into the hidden `image` widget as a `/view` path and fires its core callback (the only reactive preview path reachable from plain JS). Folders outside `input/` use a virtual `__enhutils__/<hash>` subfolder served in place by `middleware.py` -> `serve_virtual_view()` in `nodes/image_load_routes.py`. Nothing is copied.
+- Folder allowlist: `allowed_folders.txt` (gitignored; template `allowed_folders.rename.txt`) and/or `ENHUTILS_ALLOWED_FOLDERS` (comma-separated). Missing = unrestricted, empty = input only; both present = intersection. Enforced in `_resolve_folder` / `_resolve_folder_image` (covers `/list`, execute, validate, fingerprint) and re-checked per virtual `/view` request. Never resolve custom-folder paths without going through these.
 - WebP EXIF metadata uses `piexif` -- it's lightweight but can fail on malformed data (always try/except)
 
 ## Adding New Features

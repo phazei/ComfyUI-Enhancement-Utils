@@ -1,0 +1,20 @@
+# Folder allowlist for "Load Image (With Subfolders)" custom-folder mode.
+#
+# This file is INACTIVE. Rename (or copy) it to allowed_folders.txt to
+# restrict which folders the node may list, preview, and load from.
+#
+#   - No allowed_folders.txt:          any folder is allowed (default).
+#   - allowed_folders.txt, no entries: only the ComfyUI input folder.
+#   - allowed_folders.txt with entries: those folders (and their subfolders)
+#                                       plus the ComfyUI input folder.
+#
+# One folder per line. Blank lines and lines starting with # are ignored.
+# Relative paths are resolved against the ComfyUI input folder.
+# Changes take effect immediately, no restart needed.
+#
+# The ENHUTILS_ALLOWED_FOLDERS environment variable works the same way
+# (comma-separated). If both are set, a folder must be allowed by both.
+#
+# Examples:
+# D:\datasets
+# /home/me/pictures

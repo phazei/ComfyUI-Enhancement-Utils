@@ -4,3 +4,6 @@ __pycache__/
 
 # Build tooling (src/ has its own .gitignore for node_modules/)
 src/node_modules/
+
+# Local image-loader folder allowlist (template: allowed_folders.rename.txt)
+allowed_folders.txt

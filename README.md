@@ -229,7 +229,23 @@ Improvements over other image loaders:
 - **SHA-256 caching** -- only re-executes when the file on disk actually changes
 - Excludes system files (`Thumbs.db`, `.DS_Store`, `desktop.ini`), dot-folders, and the `clipspace` temp folder
 
-> **Security note** -- custom-folder mode lets the ComfyUI server list and serve images from any folder you enter. That's fine locally, but don't expose the server (`--listen`) to untrusted networks.
+#### Restricting custom folders
+
+By default, custom-folder mode can list, preview and load images from **any folder** the ComfyUI server can read. That's fine locally, but on a shared or `--listen` server you'll likely want to restrict it. This is controlled on the server's filesystem, not in the UI settings, so users of the UI can't turn it back off.
+
+Rename `allowed_folders.rename.txt` (in this node pack's folder) to `allowed_folders.txt`:
+
+| `allowed_folders.txt` | Allowed folders |
+|---|---|
+| Missing (default) | Any folder |
+| Present, no entries | ComfyUI input folder only |
+| Present, one folder per line | Those folders and their subfolders, plus the input folder |
+
+Lines starting with `#` are comments; relative paths resolve against the input folder. Edits apply immediately, no restart needed. The file is gitignored, so node updates don't touch it.
+
+Alternatively set the `ENHUTILS_ALLOWED_FOLDERS` environment variable, with the same rules and a comma-separated list (set but empty = input folder only). It survives uninstall/reinstall of the node pack. If both are set, a folder must be allowed by both.
+
+Blocked folders show a warning toast in the UI and fail validation if queued. Subfolders of the input folder always work.
 
 ---
 
