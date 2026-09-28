@@ -4,7 +4,7 @@ A curated collection of enhancement utilities for ComfyUI, combining and improvi
 
 > **Full Subgraph Support** -- Every feature in this package works inside subgraphs. Graph arrangement, node navigation, execution profiling, and running-node highlights all handle nested subgraphs correctly. None of the original packages these features were drawn from support subgraphs.
 
-> **Nodes 2.0 Compatible** -- Every feature works in both the legacy LiteGraph canvas renderer and the new Nodes 2.0 Vue renderer. Profiling badges, graph arrangement, node navigation, resource monitoring, and all nodes function correctly in either mode. (One minor exception: the image loader's custom-folder on-node preview and MaskEditor are legacy-canvas only -- see [Load Image (With Subfolders)](#load-image-with-subfolders).)
+> **Nodes 2.0 Compatible** -- Every feature works in both the legacy LiteGraph canvas renderer and the new Nodes 2.0 Vue renderer. Profiling badges, graph arrangement, node navigation, resource monitoring, and all nodes function correctly in either mode.
 
 ## Features
 
@@ -217,8 +217,8 @@ Setting `folder_path` switches to custom-folder mode and overrides the `image` d
 Improvements over other image loaders:
 - **Custom-folder loading** -- load from any folder on disk (absolute or input-relative) via `folder_path`, scanned recursively
 - **Recursive subfolder scanning** with `os.walk`
-- **Live preview** -- the selected custom-folder image previews on the node and persists across workflow-tab switches and subgraph navigation (legacy canvas)
-- **MaskEditor + Paste (Clipspace)** -- supported in custom-folder mode; the chosen image is copied to a temp location on demand (not on every selection), and re-opening MaskEditor reloads an existing mask (legacy canvas)
+- **Live preview** -- the selected custom-folder image previews on the node in both renderers, served in place (nothing is copied)
+- **MaskEditor + Paste (Clipspace)** -- supported in custom-folder mode from every MaskEditor entry point; re-opening MaskEditor reloads an existing mask
 - **Primitive node support** -- the `folder_image` combo populates on a connected Primitive node, updating on page load, `folder_path` change, and global refresh
 - **Content-type filtering** -- only shows actual image files (uses ComfyUI's MIME-type detection)
 - **Truncated image recovery** -- uses `node_helpers.pillow()` for resilient loading
@@ -229,7 +229,7 @@ Improvements over other image loaders:
 - **SHA-256 caching** -- only re-executes when the file on disk actually changes
 - Excludes system files (`Thumbs.db`, `.DS_Store`, `desktop.ini`), dot-folders, and the `clipspace` temp folder
 
-> **Nodes 2.0 note** -- Custom-folder mode loads and outputs the selected image correctly in the Nodes 2.0 (Vue) renderer, but the on-node image preview does not update on `folder_image` change and MaskEditor is not supported in custom-folder mode there. Use the legacy canvas renderer for preview and MaskEditor with custom folders. Default mode works fully in both renderers.
+> **Security note** -- custom-folder mode lets the ComfyUI server list and serve images from any folder you enter. That's fine locally, but don't expose the server (`--listen`) to untrusted networks.
 
 ---
 

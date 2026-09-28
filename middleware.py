@@ -1,27 +1,25 @@
 """
-Workaround middleware for ComfyUI's /api/view endpoint subfolder handling.
+Middleware for ComfyUI's /api/view endpoint.
 
-The Nodes 2.0 frontend's ``WidgetSelectDropdown.vue`` constructs thumbnail URLs
-by passing the full combo value (e.g. ``subfolder/image.png``) as a single
-``filename`` query parameter::
+1. **Subfolder-in-filename fix.** The Nodes 2.0 frontend's
+   ``WidgetSelectDropdown.vue`` constructs thumbnail URLs by passing the full
+   combo value (e.g. ``subfolder/image.png``) as a single ``filename`` query
+   parameter::
 
-    /api/view?filename=subfolder%2Fimage.png&type=input
+       /api/view?filename=subfolder%2Fimage.png&type=input
 
-The backend's ``/view`` handler calls ``os.path.basename(filename)`` which
-strips the subfolder portion, then looks for the file in the root input
-directory -- resulting in a 404.
+   The backend's ``/view`` handler calls ``os.path.basename(filename)`` which
+   strips the subfolder portion, then looks for the file in the root input
+   directory -- resulting in a 404. This middleware rewrites such requests to
+   the correct form (``filename=image.png&subfolder=subfolder``) when no
+   ``subfolder`` param is present.
 
-The correct URL format uses separate ``filename`` and ``subfolder`` params::
+   Upstream fix: https://github.com/Comfy-Org/ComfyUI_frontend/pull/12438
+   Once merged, this rewrite becomes a harmless no-op.
 
-    /api/view?filename=image.png&subfolder=subfolder&type=input
-
-This middleware transparently rewrites incoming ``/view`` and ``/api/view``
-requests to split the path components when the ``filename`` param contains
-a ``/`` and no ``subfolder`` param is present.
-
-Upstream fix: https://github.com/Comfy-Org/ComfyUI_frontend/pull/12438
-Once merged, this middleware becomes a harmless no-op (the ``subfolder``
-param will already be present, so the rewrite is skipped).
+2. **Virtual custom-folder subfolders.** Requests whose subfolder starts with
+   ``__enhutils__/`` are served in place from folders registered by the
+   ImageLoadWithSubfolders node (see ``nodes/image_load_routes.py``).
 """
 
 import logging
@@ -30,39 +28,41 @@ from aiohttp import web
 
 import server
 
+from .nodes.image_load_routes import serve_virtual_view
+
 logger = logging.getLogger("enhutils.middleware")
 
 
 @web.middleware
 async def fix_view_subfolder(request: web.Request, handler):
-    """Rewrite /view requests to split subfolder out of the filename param.
+    """Split subfolder out of ``filename`` and serve virtual custom-folder paths.
 
-    Only activates when:
-    - The path is ``/view`` or ``/api/view``
-    - ``filename`` contains a ``/`` (i.e. has a subfolder component)
-    - ``subfolder`` is not already present in the query string
-
-    The rewrite is transparent to the handler -- it receives a cloned request
-    with corrected query parameters.
+    The split only activates when ``filename`` contains a ``/`` and no
+    ``subfolder`` param is present. The rewrite is transparent to the handler
+    -- it receives a cloned request with corrected query parameters.
     """
-    if request.path in ("/view", "/api/view"):
-        filename = request.rel_url.query.get("filename", "")
-        if "/" in filename and "subfolder" not in request.rel_url.query:
-            last_slash = filename.rfind("/")
-            subfolder = filename[:last_slash]
-            bare_filename = filename[last_slash + 1:]
+    if request.path not in ("/view", "/api/view"):
+        return await handler(request)
 
-            query = dict(request.rel_url.query)
-            query["filename"] = bare_filename
-            query["subfolder"] = subfolder
+    query = request.rel_url.query
+    filename = query.get("filename", "")
+    subfolder = query.get("subfolder", "")
 
-            new_url = request.rel_url.with_query(query)
-            request = request.clone(rel_url=new_url)
-            logger.debug(
-                "Rewrote /view query: filename=%s subfolder=%s",
-                bare_filename,
-                subfolder,
-            )
+    if "/" in filename and "subfolder" not in query:
+        last_slash = filename.rfind("/")
+        subfolder = filename[:last_slash]
+        filename = filename[last_slash + 1:]
+
+        new_query = dict(query)
+        new_query["filename"] = filename
+        new_query["subfolder"] = subfolder
+        request = request.clone(rel_url=request.rel_url.with_query(new_query))
+        logger.debug("Rewrote /view query: filename=%s subfolder=%s", filename, subfolder)
+
+    if query.get("type", "input") == "input":
+        response = serve_virtual_view(subfolder, filename, request.rel_url.query)
+        if response is not None:
+            return response
 
     return await handler(request)
 

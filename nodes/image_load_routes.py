@@ -1,28 +1,75 @@
 """
 HTTP API routes for the ImageLoadWithSubfolders custom-folder feature.
 
-Provides endpoints for the frontend to:
-- Fetch the list of images in an arbitrary folder (for the combo widget).
-- Serve an image preview from an arbitrary folder (for the node preview).
-- Copy a folder image into ComfyUI's temp directory so the MaskEditor can
-  open it (MaskEditor requires images to be addressable via ``/view``).
+Provides:
+- ``GET /enhutils/image_loader/list`` -- list the images in an arbitrary
+  folder (for the ``folder_image`` combo), plus the ``view_subfolder`` the
+  frontend should use to address them through the standard ``/view`` endpoint.
+- A ``/view`` middleware that serves files from registered custom folders
+  addressed via a virtual subfolder (``__enhutils__/<id>/...``).
 
-Registered on PromptServer via aiohttp route decorators (same pattern as
-``monitor/routes.py``).
+Why a virtual subfolder: the frontend's image preview (both renderers) and
+the MaskEditor build ``/view?filename=..&subfolder=..&type=input`` URLs from
+the ``image`` widget value. By setting that widget to
+``__enhutils__/<id>/<relpath>``, the core frontend's own reactive preview and
+MaskEditor paths work unchanged, and files are read in place -- nothing is
+copied or written. Folders inside the input directory don't need this at all;
+they are addressed with their real input-relative subfolder.
+
+Only folders registered through ``/list`` can be served, so a bare URL can't
+read arbitrary paths. ``/list`` itself accepts any folder, so this is not an
+access-control boundary -- do not expose the server to untrusted networks.
 """
 
+import hashlib
 import logging
 import mimetypes
 import os
-import shutil
+from io import BytesIO
 
 from aiohttp import web
+from PIL import Image
 import folder_paths
 import server
 
 from .image_load_subfolders import _resolve_folder, _scan_image_dir
 
 logger = logging.getLogger("enhutils.image_loader.routes")
+
+# Prefix of the virtual ``/view`` subfolder for folders outside the input dir.
+VIRTUAL_PREFIX = "__enhutils__"
+
+# Registered custom folders: id -> resolved absolute path.
+_folder_registry: dict[str, str] = {}
+
+
+def _is_within(path: str, base: str) -> bool:
+    """Return True if absolute *path* is *base* or inside it.
+
+    ``os.path.commonpath`` raises on Windows when the paths are on different
+    drives; that simply means "not inside".
+    """
+    try:
+        return os.path.commonpath((path, base)) == base
+    except ValueError:
+        return False
+
+
+def _register_folder(resolved: str) -> str:
+    """Register a resolved folder and return its ``/view`` subfolder.
+
+    Folders inside the input directory map to their real input-relative
+    subfolder (served natively by ``/view``). Anything else gets a stable
+    hash id under :data:`VIRTUAL_PREFIX`, served by :func:`serve_virtual_view`.
+    """
+    input_dir = os.path.abspath(folder_paths.get_input_directory())
+    if _is_within(resolved, input_dir):
+        rel = os.path.relpath(resolved, input_dir)
+        return "" if rel == "." else rel.replace("\\", "/")
+
+    folder_id = hashlib.sha1(os.path.normcase(resolved).encode("utf-8")).hexdigest()[:16]
+    _folder_registry[folder_id] = resolved
+    return f"{VIRTUAL_PREFIX}/{folder_id}"
 
 
 @server.PromptServer.instance.routes.get("/enhutils/image_loader/list")
@@ -34,17 +81,17 @@ async def list_folder_images(request: web.Request) -> web.Response:
             input directory.
 
     Returns:
-        JSON ``{"path": <resolved>, "count": <n>, "images": [<relpaths>]}``
-        on success, or a 400 error on invalid/missing path.
+        JSON ``{"path", "count", "images", "view_subfolder"}`` on success, or
+        a 400 error on invalid/missing path. ``view_subfolder`` is the
+        subfolder (relative to ``type=input``) to prefix image paths with when
+        addressing them via ``/view``.
     """
     folder_path = request.query.get("path", "").strip()
     if not folder_path:
-        return web.json_response(
-            {"error": "Missing 'path' query parameter."}, status=400
-        )
+        return web.json_response({"error": "Missing 'path' query parameter."}, status=400)
 
     try:
-        resolved = _resolve_folder(folder_path)
+        resolved = os.path.abspath(_resolve_folder(folder_path))
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -55,137 +102,79 @@ async def list_folder_images(request: web.Request) -> web.Response:
         "path": resolved,
         "count": len(images),
         "images": images,
+        "view_subfolder": _register_folder(resolved),
     })
 
 
-# ── Image Preview ───────────────────────────────────────────────────────────
+# ── Virtual /view Serving ───────────────────────────────────────────────────
 
-# Fallback MIME types for common image formats (in case the OS lookup fails).
-_MIME_FALLBACKS = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-    ".bmp": "image/bmp",
-    ".tiff": "image/tiff",
-    ".tif": "image/tiff",
-}
+def _image_response(file: str, query) -> web.StreamResponse:
+    """Serve *file* honouring the ``preview`` and ``channel`` params of ``/view``.
 
-
-@server.PromptServer.instance.routes.get("/enhutils/image_loader/preview")
-async def preview_folder_image(request: web.Request) -> web.Response:
-    """Serve an image file from a custom folder for the node preview.
-
-    Query params:
-        path (str, required): Absolute or input-relative folder path.
-        image (str, required): Relative image path within the folder
-            (forward-slash separated, as returned by the ``/list`` endpoint).
-
-    Returns the raw image bytes with the appropriate content-type, or a
-    400/404 error on invalid parameters.
+    Mirrors the subset of ComfyUI's ``/view`` handler used by previews and
+    the MaskEditor: ``preview=<webp|jpeg>;<quality>`` and ``channel=rgb|a``.
     """
-    folder_path = request.query.get("path", "").strip()
-    image_rel = request.query.get("image", "").strip()
+    filename = os.path.basename(file)
+    headers = {"Content-Disposition": f"filename=\"{filename}\""}
+    channel = query.get("channel", "rgba")
 
-    if not folder_path or not image_rel:
-        return web.json_response(
-            {"error": "Missing 'path' or 'image' query parameter."}, status=400
-        )
+    if "preview" in query:
+        preview_info = query["preview"].split(";")
+        image_format = preview_info[0]
+        if image_format not in ("webp", "jpeg") or "a" in query.get("channel", ""):
+            image_format = "webp"
+        quality = int(preview_info[-1]) if preview_info[-1].isdigit() else 90
+        with Image.open(file) as img:
+            if image_format == "jpeg" or channel == "rgb":
+                img = img.convert("RGB")
+            buffer = BytesIO()
+            img.save(buffer, format=image_format, quality=quality)
+        return web.Response(body=buffer.getvalue(), content_type=f"image/{image_format}", headers=headers)
 
-    try:
-        resolved_dir = _resolve_folder(folder_path)
-    except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=400)
+    if channel == "rgb":
+        with Image.open(file) as img:
+            out = img.convert("RGB")
+            buffer = BytesIO()
+            out.save(buffer, format="PNG")
+        return web.Response(body=buffer.getvalue(), content_type="image/png", headers=headers)
 
-    # Resolve and validate the image path.
-    image_path = os.path.normpath(os.path.join(resolved_dir, image_rel))
+    if channel == "a":
+        with Image.open(file) as img:
+            alpha = img.getchannel("A") if "A" in img.getbands() else Image.new("L", img.size, 255)
+            out = Image.new("RGBA", img.size)
+            out.putalpha(alpha)
+            buffer = BytesIO()
+            out.save(buffer, format="PNG")
+        return web.Response(body=buffer.getvalue(), content_type="image/png", headers=headers)
 
-    # Guard against path traversal (the resolved file must stay inside the folder).
-    # Append os.sep to the dir to prevent prefix matches like /foo matching /foobar.
-    if not image_path.startswith(resolved_dir + os.sep) and image_path != resolved_dir:
-        return web.json_response(
-            {"error": "Image path escapes the folder."}, status=400
-        )
-
-    if not os.path.isfile(image_path):
-        return web.json_response(
-            {"error": f"Image not found: {image_rel}"}, status=404
-        )
-
-    # Determine content type.
-    ext = os.path.splitext(image_path)[1].lower()
-    content_type = mimetypes.guess_type(image_path)[0] or _MIME_FALLBACKS.get(ext, "application/octet-stream")
-
-    return web.FileResponse(image_path, headers={"Content-Type": content_type})
-
-
-# ── Copy to Temp (MaskEditor Support) ───────────────────────────────────────
-
-# Subfolder inside ComfyUI's temp directory for folder-image copies.
-_TEMP_SUBFOLDER = "enhutils_maskedit"
+    content_type = mimetypes.guess_type(file)[0] or "application/octet-stream"
+    if not content_type.startswith("image/"):
+        return web.Response(status=403)
+    return web.FileResponse(file, headers={"Content-Type": content_type})
 
 
-@server.PromptServer.instance.routes.post("/enhutils/image_loader/copy_to_temp")
-async def copy_to_temp(request: web.Request) -> web.Response:
-    """Copy a folder image into ComfyUI's temp directory for MaskEditor.
+def serve_virtual_view(subfolder: str, filename: str, query) -> web.StreamResponse | None:
+    """Serve a ``/view`` request addressed to a virtual custom-folder subfolder.
 
-    MaskEditor requires images to be addressable via the ``/view`` endpoint
-    (i.e. inside input/output/temp dirs). This endpoint copies the selected
-    folder image into ``temp/enhutils_maskedit/<basename>`` so MaskEditor
-    can open it via ``/view?type=temp&subfolder=enhutils_maskedit&filename=...``.
-
-    JSON body:
-        path (str, required): Absolute or input-relative folder path.
-        image (str, required): Relative image path within the folder.
+    Args:
+        subfolder: The (already split) subfolder, e.g. ``__enhutils__/<id>/sub``.
+        filename: The bare filename.
+        query: The request query mapping (for ``preview``/``channel``).
 
     Returns:
-        JSON ``{"filename": <basename>, "subfolder": "enhutils_maskedit", "type": "temp"}``
-        on success, or a 400/404 error.
+        A response, or ``None`` if *subfolder* is not a virtual path (the
+        request should fall through to the normal ``/view`` handler).
     """
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    parts = subfolder.replace("\\", "/").split("/", 2)
+    if parts[0] != VIRTUAL_PREFIX:
+        return None
+    if len(parts) < 2 or parts[1] not in _folder_registry:
+        return web.Response(status=404)
 
-    folder_path = (body.get("path") or "").strip()
-    image_rel = (body.get("image") or "").strip()
+    base = _folder_registry[parts[1]]
+    rel = parts[2] if len(parts) == 3 else ""
+    file = os.path.abspath(os.path.join(base, rel, os.path.basename(filename)))
+    if not _is_within(file, base) or not os.path.isfile(file):
+        return web.Response(status=404)
 
-    if not folder_path or not image_rel:
-        return web.json_response(
-            {"error": "Missing 'path' or 'image' in request body."}, status=400
-        )
-
-    try:
-        resolved_dir = _resolve_folder(folder_path)
-    except ValueError as exc:
-        return web.json_response({"error": str(exc)}, status=400)
-
-    # Resolve and validate the source image path.
-    source_path = os.path.normpath(os.path.join(resolved_dir, image_rel))
-
-    if not source_path.startswith(resolved_dir + os.sep) and source_path != resolved_dir:
-        return web.json_response(
-            {"error": "Image path escapes the folder."}, status=400
-        )
-
-    if not os.path.isfile(source_path):
-        return web.json_response(
-            {"error": f"Image not found: {image_rel}"}, status=404
-        )
-
-    # Copy to temp directory (plain basename, overwrite if exists).
-    temp_dir = os.path.join(folder_paths.get_temp_directory(), _TEMP_SUBFOLDER)
-    os.makedirs(temp_dir, exist_ok=True)
-
-    basename = os.path.basename(source_path)
-    dest_path = os.path.join(temp_dir, basename)
-    shutil.copy2(source_path, dest_path)
-
-    logger.debug("Copied %s -> %s", source_path, dest_path)
-
-    return web.json_response({
-        "filename": basename,
-        "subfolder": _TEMP_SUBFOLDER,
-        "type": "temp",
-    })
+    return _image_response(file, query)

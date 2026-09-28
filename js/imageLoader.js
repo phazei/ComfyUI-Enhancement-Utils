@@ -11,23 +11,23 @@
  *    ``image`` dropdown + upload button are shown; in custom-folder mode
  *    only ``folder_path`` + ``folder_image`` + info line are shown.
  *
- * 3. **Image preview** (legacy canvas renderer) -- when a ``folder_image``
- *    is selected, the preview thumbnail is loaded via a backend endpoint
- *    (for real folder images) or via ``/view`` (for annotated paths from
- *    MaskEditor saves or clipspace pastes). Nodes 2.0 (Vue) preview is
- *    not supported (the Vue renderer reads from an internal reactive store
- *    that is not reachable from plain JS).
+ * 3. **Image preview + MaskEditor (both renderers)** -- the selected
+ *    ``folder_image`` is mirrored into the hidden ``image`` widget as a
+ *    ``/view``-addressable path, and the core upload widget's own callback
+ *    is fired. The core then updates its reactive node output store, so the
+ *    preview works in both the legacy canvas and Nodes 2.0, and the
+ *    MaskEditor (which reads the ``image`` widget) opens the right file from
+ *    every entry point. The ``/list`` endpoint tells us which subfolder to
+ *    use: the real input-relative one for folders inside ``input/``, or a
+ *    virtual ``__enhutils__/<id>`` subfolder that our ``/view`` middleware
+ *    serves in place. Nothing is copied or written.
  *
- * 4. **MaskEditor + Paste support** -- when "Open in MaskEditor" is clicked
- *    in folder mode, the selected folder image is copied into ComfyUI's
- *    temp directory and the ``image`` widget is set to the temp annotated
- *    path (MaskEditor requires images addressable via ``/view``). When
- *    MaskEditor saves or the user pastes via "Paste (clipspace)", the
- *    resulting annotated path is written to the ``image`` widget; a
- *    property accessor detects this and injects the path as a selectable
- *    entry in the ``folder_image`` combo. Re-opening MaskEditor on a
- *    ``clipspace-painted-masked-`` entry reloads the existing mask
- *    automatically from alpha.
+ * 4. **MaskEditor save + Paste support** -- when MaskEditor saves or the
+ *    user pastes via "Paste (clipspace)", the resulting annotated path is
+ *    written to the ``image`` widget; a property accessor detects this and
+ *    injects the path as a selectable entry in the ``folder_image`` combo.
+ *    Re-opening MaskEditor on a ``clipspace-painted-masked-`` entry reloads
+ *    the existing mask automatically from alpha.
  *
  * Refresh triggers:
  * - Node creation (if folder_path already has a value from a loaded workflow).
@@ -43,8 +43,20 @@ const NODE_TYPE = "EnhancementUtils_ImageLoadWithSubfolders";
 
 // ── Cache ──────────────────────────────────────────────────────────────────
 
-/** @type {Map<string, string[]>} Cached image lists keyed by folder path. */
+/**
+ * A folder listing from ``/enhutils/image_loader/list``.
+ *
+ * @typedef {Object} FolderListing
+ * @property {string[]} images - Sorted relative image paths.
+ * @property {string} viewSubfolder - ``/view`` subfolder (``type=input``)
+ *     that addresses the folder: input-relative, or ``__enhutils__/<id>``.
+ */
+
+/** @type {Map<string, FolderListing>} Cached folder listings keyed by folder path. */
 const listCache = new Map();
+
+/** Node property holding the ``image`` value to restore when leaving folder mode. */
+const IMAGE_BEFORE_FOLDER_PROP = "enhutils_image_before_folder";
 
 /**
  * Node ids detected as "old-format" during the current graph load -- saves
@@ -141,7 +153,7 @@ function installFolderImageGetConfig(node) {
 
         if (isEmpty) {
             const key = (folderWidget?.value ?? "").trim();
-            const cached = key ? listCache.get(key) : undefined;
+            const cached = key ? listCache.get(key)?.images : undefined;
             if (cached && cached.length > 0) {
                 return [cached.slice(), {}];
             }
@@ -221,89 +233,18 @@ function forceWidgetReactiveUpdate(node, widget) {
     node?.onWidgetChanged?.(widget.name, value, value, widget);
 }
 
-// ── Node Output Store (Preview Persistence) ────────────────────────────────
-
-/**
- * Compute a node's NodeLocatorId -- the key the ComfyUI frontend uses for
- * ``app.nodeOutputs`` and ``app.nodePreviewImages``.
- *
- * Mirrors the frontend's ``nodeToNodeLocatorId``: root-graph nodes use the
- * bare local id; subgraph nodes use ``<immediateSubgraphUUID>:<localId>``.
- * Note this is the *immediate* containing subgraph only -- NOT the full
- * colon-delimited execution path (that's ``getUniqueIdFromNode``).
- *
- * @param {Object} node - The LiteGraph node instance.
- * @returns {string} The NodeLocatorId.
- */
-function nodeLocatorKey(node) {
-    const graph = node.graph;
-    if (graph && graph.isRootGraph === false && graph.id) {
-        return `${graph.id}:${node.id}`;
-    }
-    return String(node.id);
-}
-
-/**
- * Make the folder image's preview URL the authoritative *visible* preview
- * for this node by writing it into the frontend's node output store.
- *
- * ``getNodeImageUrls`` checks ``app.nodePreviewImages[locator]`` *before*
- * ``app.nodeOutputs[locator]``, so injecting the URL there makes the core
- * ``showPreview()`` (which fires on page load, tab switch, and subgraph
- * navigation) load *our* folder image instead of the hidden ``image``
- * widget's picture. The plain (non-blob) URL is leak-safe: the store's
- * ``retain/releaseSharedObjectUrl`` are no-ops for non-blob URLs.
- *
- * IMPORTANT: we do NOT touch ``app.nodeOutputs[locator]`` here. That map is
- * what the MaskEditor / Copy / Save / Open Image consumers read (via a
- * ``/view`` URL), and deleting it forces them onto ``node.imgs[0].src`` --
- * our custom preview URL has no ``filename`` param, so MaskEditor's
- * ``parseImageRef`` throws "Invalid image URL". Leaving ``nodeOutputs``
- * alone keeps those consumers working; ``nodePreviewImages`` already wins
- * the visible preview because it is checked first.
- *
- * @param {Object} node - The LiteGraph node instance.
- * @param {string} url - The folder image preview URL.
- */
-function setFolderPreviewInStore(node, url) {
-    const key = nodeLocatorKey(node);
-    try {
-        if (app.nodePreviewImages) {
-            app.nodePreviewImages[key] = [url];
-        }
-    } catch (err) {
-        console.warn("[EnhancementUtils] ImageLoader: failed to set store preview:", err);
-    }
-}
-
-/**
- * Remove this node's folder preview override from the store so default
- * (non-folder-mode) preview behaviour resumes.
- *
- * @param {Object} node - The LiteGraph node instance.
- */
-function clearFolderPreviewFromStore(node) {
-    const key = nodeLocatorKey(node);
-    try {
-        if (app.nodePreviewImages) {
-            delete app.nodePreviewImages[key];
-        }
-    } catch (err) {
-        console.warn("[EnhancementUtils] ImageLoader: failed to clear store preview:", err);
-    }
-}
-
 // ── API ────────────────────────────────────────────────────────────────────
 
 /**
- * Fetch the image list for a folder from the backend.
+ * Fetch the listing for a folder from the backend. Also (re-)registers the
+ * folder server-side so its virtual ``/view`` subfolder can be served.
  *
  * @param {string} folderPath - Absolute or input-relative folder path.
  * @param {boolean} [bypassCache=false] - If true, skip the cache and re-fetch.
- * @returns {Promise<string[]>} Sorted list of relative image paths.
+ * @returns {Promise<FolderListing|null>} The listing, or null on failure.
  */
-async function fetchImageList(folderPath, bypassCache = false) {
-    if (!folderPath || !folderPath.trim()) return [];
+async function fetchFolderListing(folderPath, bypassCache = false) {
+    if (!folderPath || !folderPath.trim()) return null;
 
     const key = folderPath.trim();
     if (!bypassCache && listCache.has(key)) {
@@ -316,41 +257,17 @@ async function fetchImageList(folderPath, bypassCache = false) {
         );
         if (!resp.ok) {
             console.warn("[EnhancementUtils] ImageLoader: folder list request failed:", resp.status);
-            return [];
-        }
-        const data = await resp.json();
-        const images = data.images ?? [];
-        listCache.set(key, images);
-        return images;
-    } catch (err) {
-        console.warn("[EnhancementUtils] ImageLoader: folder list fetch error:", err);
-        return [];
-    }
-}
-
-/**
- * Copy a folder image into ComfyUI's temp directory so MaskEditor and
- * ``/view`` can address it.
- *
- * @param {string} folderPath - The folder_path widget value.
- * @param {string} folderImage - The relative image path within the folder.
- * @returns {Promise<{filename: string, subfolder: string, type: string}|null>}
- *     The temp file reference on success, or null on failure.
- */
-async function copyToTemp(folderPath, folderImage) {
-    try {
-        const resp = await api.fetchApi("/enhutils/image_loader/copy_to_temp", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: folderPath.trim(), image: folderImage.trim() }),
-        });
-        if (!resp.ok) {
-            console.warn("[EnhancementUtils] ImageLoader: copy_to_temp failed:", resp.status);
             return null;
         }
-        return await resp.json();
+        const data = await resp.json();
+        const listing = {
+            images: data.images ?? [],
+            viewSubfolder: data.view_subfolder ?? "",
+        };
+        listCache.set(key, listing);
+        return listing;
     } catch (err) {
-        console.warn("[EnhancementUtils] ImageLoader: copy_to_temp error:", err);
+        console.warn("[EnhancementUtils] ImageLoader: folder list fetch error:", err);
         return null;
     }
 }
@@ -395,16 +312,6 @@ function showWidget(widget) {
 }
 
 /**
- * Check whether ``folder_image`` currently holds a clipspace path.
- *
- * @param {string} value - The folder_image widget value.
- * @returns {boolean}
- */
-function isClipspaceValue(value) {
-    return typeof value === "string" && value.includes("clipspace");
-}
-
-/**
  * Check whether a value is a ComfyUI annotated path (ends with ``[type]``).
  * These come from MaskEditor saves or "Paste (clipspace)" actions.
  *
@@ -437,19 +344,10 @@ function syncWidgetVisibility(node, folderPath) {
         showWidget(uploadWidget);
         hideWidget(folderImageWidget);
 
-        // Leaving folder mode: drop the folder preview override so the
-        // default ``image`` widget preview can take over again.
-        clearFolderPreviewFromStore(node);
-
-        // The folder preview left a stale ``node.imgs``; nothing re-derives
-        // the ``image`` widget preview just from un-hiding it. Re-fire the
-        // image widget's callback so the core repaints from its current
-        // selection. Only meaningful on an actual folder->regular switch.
+        // Folder mode left a folder path in the ``image`` widget; restore
+        // the user's own selection. Only on an actual folder->regular switch.
         if (node._wasFolderMode && imageWidget) {
-            const v = imageWidget.value;
-            if (typeof v === "string" && v.trim() && !isAnnotatedPath(v)) {
-                imageWidget.callback?.(v);
-            }
+            restoreImageBeforeFolder(node, imageWidget);
         }
     }
 
@@ -460,8 +358,8 @@ function syncWidgetVisibility(node, folderPath) {
 // ── Combo + Info Updates ───────────────────────────────────────────────────
 
 /**
- * Replace the ``folder_image`` combo options with a new list of images,
- * reset the selection if invalid, and update the info display.
+ * Replace the ``folder_image`` combo options with a new list of images and
+ * reset the selection if invalid.
  *
  * @param {Object} node - The LiteGraph node instance.
  * @param {string[]} images - Sorted list of relative image paths.
@@ -495,121 +393,139 @@ function applyImageList(node, images) {
     refreshConnectedPrimitives(node);
 }
 
-// ── Preview (Legacy Canvas Renderer) ───────────────────────────────────────
+// ── Image Widget Mirroring (Preview + MaskEditor) ──────────────────────────
 
 /**
- * Build the preview URL for a folder image via our custom endpoint.
+ * Map a ``folder_image`` value to the ``image`` widget value that addresses
+ * the same file through ``/view``.
  *
- * @param {string} folderPath - The folder_path widget value.
- * @param {string} folderImage - The folder_image widget value.
- * @returns {string} Full URL to the preview endpoint.
+ * Annotated paths (MaskEditor saves, pastes) are already addressable. Real
+ * folder images are prefixed with the folder's ``viewSubfolder`` from the
+ * cached listing, which the core splits into ``subfolder``/``filename``.
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {string} folderImage - The ``folder_image`` value.
+ * @returns {string|null} The ``image`` widget value, or null if the folder
+ *     listing isn't loaded yet.
  */
-function buildFolderPreviewUrl(folderPath, folderImage) {
-    return api.apiURL(
-        `/enhutils/image_loader/preview?path=${encodeURIComponent(folderPath.trim())}` +
-        `&image=${encodeURIComponent(folderImage.trim())}`
-    );
+function toImageWidgetValue(node, folderImage) {
+    if (isAnnotatedPath(folderImage)) return folderImage;
+
+    const key = (findWidget(node, "folder_path")?.value ?? "").trim();
+    const listing = listCache.get(key);
+    if (!listing) return null;
+
+    return listing.viewSubfolder ? `${listing.viewSubfolder}/${folderImage}` : folderImage;
 }
 
 /**
- * Build the preview URL for an annotated path via the standard ``/view``
- * endpoint.
+ * Set the ``image`` widget without triggering the MaskEditor-save
+ * interception, then fire the core upload widget's callback so it refreshes
+ * the node's preview through the frontend's own reactive output store.
  *
- * Parses the annotated path (e.g. ``clipspace/file.png [input]`` or
- * ``file.png [temp]``) into filename, subfolder, and type components.
- *
- * @param {string} annotatedPath - The annotated path string.
- * @returns {string} Full URL to the /view endpoint.
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {Object} imageWidget - The ``image`` widget.
+ * @param {string} value - The new value.
  */
-function buildAnnotatedPreviewUrl(annotatedPath) {
-    let value = annotatedPath.trim();
-    let type = "input";
-    const typeMatch = value.match(/ \[([^\]]+)\]$/);
-    if (typeMatch) {
-        type = typeMatch[1];
-        value = value.slice(0, -typeMatch[0].length);
+function setImageWidget(node, imageWidget, value) {
+    if (findWidget(node, "folder_path")?.value?.trim()) {
+        setMirroredImageOption(node, imageWidget, value);
     }
-    let subfolder = "";
-    const slashIdx = value.lastIndexOf("/");
-    if (slashIdx !== -1) {
-        subfolder = value.slice(0, slashIdx);
-        value = value.slice(slashIdx + 1);
+    node._settingImageFromFolder = true;
+    try {
+        imageWidget.value = value;
+    } finally {
+        node._settingImageFromFolder = false;
     }
-    const params = new URLSearchParams({
-        filename: value,
-        subfolder: subfolder,
-        type: type,
-    });
-    return api.apiURL(`/view?${params.toString()}`);
+    imageWidget.callback?.(value);
 }
 
 /**
- * Clear the node's folder preview entirely.
+ * Keep the mirrored folder value registered as an ``image`` combo option.
  *
- * Drops the store override and wipes the legacy canvas preview so a
- * previously-shown folder image doesn't linger when there is no folder
- * image to show (e.g. the selected folder contains no images, or no
- * folder image is selected).
+ * The frontend's missing-media scan (run after every workflow load) flags
+ * an upload combo whose value isn't in its options as "Media input missing".
+ * The mirrored value (``sub/x.png`` or ``__enhutils__/<id>/x.png``) is not
+ * in the input-folder list, so it is added here -- replacing the previously
+ * injected entry -- and removed again when leaving folder mode.
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {Object} imageWidget - The ``image`` widget.
+ * @param {string|null} value - The value to register, or null to only
+ *     remove the previously injected entry.
+ */
+function setMirroredImageOption(node, imageWidget, value) {
+    const values = imageWidget.options?.values;
+    if (!Array.isArray(values)) return;
+
+    const previous = node._mirroredImageOption;
+    if (previous !== undefined && previous !== value) {
+        const idx = values.indexOf(previous);
+        if (idx !== -1) values.splice(idx, 1);
+    }
+    node._mirroredImageOption = undefined;
+
+    if (value && !values.includes(value)) {
+        values.push(value);
+        node._mirroredImageOption = value;
+    } else if (value && previous === value) {
+        node._mirroredImageOption = value;
+    }
+}
+
+/**
+ * Remember the user's own ``image`` selection before folder mode overwrites
+ * it, so it can be restored when ``folder_path`` is cleared. Stored in
+ * ``node.properties`` so it survives save/reload.
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {Object} imageWidget - The ``image`` widget.
+ */
+function rememberImageBeforeFolder(node, imageWidget) {
+    if (!node.properties) node.properties = {};
+    if (node.properties[IMAGE_BEFORE_FOLDER_PROP] !== undefined) return;
+
+    const value = imageWidget.value;
+    if (value === node._mirroredImageOption) return;
+    if (imageWidget.options?.values?.includes(value)) {
+        node.properties[IMAGE_BEFORE_FOLDER_PROP] = value;
+    }
+}
+
+/**
+ * Restore the ``image`` selection remembered by
+ * :func:`rememberImageBeforeFolder` (or the first option if none was
+ * remembered and the current value isn't a real option).
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {Object} imageWidget - The ``image`` widget.
+ */
+function restoreImageBeforeFolder(node, imageWidget) {
+    setMirroredImageOption(node, imageWidget, null);
+    const values = imageWidget.options?.values ?? [];
+    const saved = node.properties?.[IMAGE_BEFORE_FOLDER_PROP];
+    if (node.properties) delete node.properties[IMAGE_BEFORE_FOLDER_PROP];
+
+    let value = imageWidget.value;
+    if (saved !== undefined && values.includes(saved)) {
+        value = saved;
+    } else if (!values.includes(value)) {
+        value = values[0] ?? "";
+    }
+    if (value) setImageWidget(node, imageWidget, value);
+}
+
+/**
+ * Clear the legacy canvas preview when there is no folder image to show
+ * (e.g. an empty folder), so a previous image doesn't linger.
  *
  * @param {Object} node - The LiteGraph node instance.
  */
 function clearPreview(node) {
-    // Drop the folder preview override from the frontend store.
-    clearFolderPreviewFromStore(node);
-
-    // Wipe the legacy canvas preview so a previously-shown folder image
-    // doesn't linger when the new folder has no selectable image (e.g. an
-    // empty folder). An empty ``node.imgs`` is the canonical "no preview"
-    // state both the legacy and Nodes 2.0 renderers respect.
     node.imgs = [];
     node.imageIndex = null;
-
     node.graph?.setDirtyCanvas?.(true, true);
 }
-
-/**
- * Load an image preview and set it on the node for the legacy canvas renderer.
- *
- * Uses the custom preview endpoint for real folder images, or the standard
- * ``/view`` endpoint for clipspace images.
- *
- * The preview URL is also written into the frontend's node output store
- * (see ``setFolderPreviewInStore``) so the folder preview survives tab
- * switches and subgraph navigation -- the core ``image``-widget preview
- * otherwise wins those, since it is snapshotted/restored via that store.
- *
- * @param {Object} node - The LiteGraph node instance.
- */
-function updatePreview(node) {
-    const folderPath = findWidget(node, "folder_path")?.value ?? "";
-    const folderImage = findWidget(node, "folder_image")?.value ?? "";
-
-    if (!folderPath.trim() || !folderImage.trim()) {
-        clearPreview(node);
-        return;
-    }
-
-    const url = isAnnotatedPath(folderImage)
-        ? buildAnnotatedPreviewUrl(folderImage)
-        : buildFolderPreviewUrl(folderPath, folderImage);
-
-    // Make our folder image the authoritative preview source for this node.
-    setFolderPreviewInStore(node, url);
-
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-        node.imgs = [img];
-        node.imageIndex = null;
-        node.graph?.setDirtyCanvas?.(true, true);
-    };
-    img.onerror = () => {
-        console.warn("[EnhancementUtils] ImageLoader: preview load failed for", folderImage);
-    };
-    img.src = url;
-}
-
-// ── Image Widget Accessor ──────────────────────────────────────────────────
 
 /**
  * Install a getter/setter on the ``image`` widget's ``value`` property to
@@ -617,6 +533,10 @@ function updatePreview(node) {
  * save or a "Paste (clipspace)" action. Both write to
  * ``imageWidget.value`` directly (no ``.callback()``), so a property
  * accessor is the only reliable way to intercept them.
+ *
+ * The accessor chains to the widget's inherited ``value`` accessor
+ * (``BaseWidget`` backs it with the frontend's widget value store), so the
+ * widget stays connected to the store.
  *
  * When an annotated path (matching ``/\s\[[^\]]+\]$/``) is assigned in
  * folder mode, the setter injects it into the ``folder_image`` combo as
@@ -626,52 +546,53 @@ function updatePreview(node) {
  * @param {Object} imageWidget - The ``image`` widget.
  */
 function installImageWidgetAccessor(node, imageWidget) {
-    // Store the underlying value on a private key.
-    let _rawValue = imageWidget.value;
+    let proto = Object.getPrototypeOf(imageWidget);
+    let inherited;
+    while (proto && !inherited) {
+        inherited = Object.getOwnPropertyDescriptor(proto, "value");
+        proto = Object.getPrototypeOf(proto);
+    }
 
-    // Flag set by handleFolderImageChange to suppress the setter's
-    // MaskEditor-save interception during programmatic updates.
+    // Fallback for widgets with a plain data ``value`` (no inherited accessor).
+    let rawValue = imageWidget.value;
+    const read = inherited?.get
+        ? () => inherited.get.call(imageWidget)
+        : () => rawValue;
+    const write = inherited?.set
+        ? (v) => inherited.set.call(imageWidget, v)
+        : (v) => { rawValue = v; };
+
     node._settingImageFromFolder = false;
 
     Object.defineProperty(imageWidget, "value", {
         get() {
-            return _rawValue;
+            return read();
         },
         set(newValue) {
-            _rawValue = newValue;
+            write(newValue);
 
-            // Skip interception if this assignment came from our own code
-            // (handleFolderImageChange / MaskEditor menu intercept), or if
-            // not in folder mode.
+            // Skip our own programmatic writes, and anything outside folder mode.
             if (node._settingImageFromFolder) return;
 
             const folderPath = findWidget(node, "folder_path")?.value ?? "";
             if (!folderPath || !folderPath.trim()) return;
 
-            // Only intercept annotated paths with a [type] suffix -- these
-            // come from MaskEditor saves or "Paste (clipspace)" actions.
-            // Plain filenames (e.g. from the image dropdown) are ignored.
-            if (!isAnnotatedPath(newValue)) {
-                return;
-            }
+            // Only annotated paths (MaskEditor saves / clipspace pastes).
+            if (!isAnnotatedPath(newValue)) return;
 
             const combo = findWidget(node, "folder_image");
             if (!combo) return;
 
-            // Replace any previously-injected annotated entry (MaskEditor
-            // saves produce new timestamped filenames, pastes produce temp
-            // paths -- strip old ones to keep exactly one override entry).
+            // Keep exactly one injected annotated entry.
             if (!combo.options) combo.options = { values: [] };
             combo.options.values = combo.options.values.filter(
                 (v) => !isAnnotatedPath(v)
             );
             combo.options.values.push(newValue);
 
-            // Select it (and fire the callback to update info + preview).
             combo.value = newValue;
             combo.callback?.(newValue);
 
-            // Sync the connected Primitive's dropdown with the new entry.
             installFolderImageGetConfig(node);
             refreshConnectedPrimitives(node);
         },
@@ -683,15 +604,9 @@ function installImageWidgetAccessor(node, imageWidget) {
 // ── folder_image Selection Handler ─────────────────────────────────────────
 
 /**
- * Handle a ``folder_image`` selection change. For annotated paths (from
- * MaskEditor save or clipspace paste), sets the ``image`` widget so
- * MaskEditor can find the existing mask on re-open. For real folder images,
- * clears any stale annotated path from the ``image`` widget. Updates the
- * legacy preview in both cases.
- *
- * The actual copy-to-temp (needed for MaskEditor to open real folder images)
- * is deferred to the MaskEditor menu intercept -- no temp copies happen on
- * every selection.
+ * Handle a ``folder_image`` selection change by mirroring it into the
+ * ``image`` widget (see :func:`toImageWidgetValue`). The core then refreshes
+ * the preview, and the MaskEditor reads the same value.
  *
  * @param {Object} node - The LiteGraph node instance.
  * @param {string} value - The newly selected folder_image value.
@@ -701,29 +616,13 @@ function handleFolderImageChange(node, value) {
     if (!folderPath.trim() || !value || !value.trim()) return;
 
     const imageWidget = findWidget(node, "image");
+    if (!imageWidget) return;
 
-    // Suppress the image-widget accessor's interception while we
-    // programmatically update the image widget.
-    node._settingImageFromFolder = true;
-    try {
-        if (isAnnotatedPath(value)) {
-            // Annotated entry (MaskEditor mask or pasted image): set the
-            // image widget so MaskEditor's loader sees it on re-open.
-            if (imageWidget) {
-                imageWidget.value = value;
-            }
-        } else {
-            // Real folder image: clear any stale annotated path from the
-            // image widget so it doesn't confuse MaskEditor or execute().
-            if (imageWidget && isAnnotatedPath(imageWidget.value ?? "")) {
-                imageWidget.value = "";
-            }
-        }
-    } finally {
-        node._settingImageFromFolder = false;
-    }
+    const imageValue = toImageWidgetValue(node, value);
+    if (imageValue === null) return;
 
-    updatePreview(node);
+    rememberImageBeforeFolder(node, imageWidget);
+    setImageWidget(node, imageWidget, imageValue);
 }
 
 // ── Refresh Orchestration ──────────────────────────────────────────────────
@@ -742,18 +641,13 @@ async function refreshFolderCombo(node, bypassCache = false) {
         return;
     }
 
-    const images = await fetchImageList(folderPath, bypassCache);
-    applyImageList(node, images);
+    const listing = await fetchFolderListing(folderPath, bypassCache);
+    applyImageList(node, listing?.images ?? []);
 
-    // Trigger the selection handler for the current value to sync the
-    // image widget and load the preview.
     const combo = findWidget(node, "folder_image");
     if (combo?.value && combo.value.trim()) {
         handleFolderImageChange(node, combo.value);
     } else {
-        // Empty folder (no selectable image): wipe any stale preview left
-        // from a previously-selected folder so it's obvious the folder has
-        // no images.
         clearPreview(node);
     }
 }
@@ -773,92 +667,13 @@ function walkGraph(graph, callback) {
 
 // ── Extension Registration ─────────────────────────────────────────────────
 
-/** Menu item text used by the framework for the MaskEditor entry. */
-const MASK_EDITOR_MENU_TEXT = "Open in MaskEditor | Image Canvas";
-
 app.registerExtension({
     name: "phazei.ImageLoaderSubfolders",
 
     /**
-     * Intercept the MaskEditor context menu item for folder-mode images.
-     *
-     * In folder mode with a real folder image selected, MaskEditor cannot
-     * open it directly (it's not addressable via ``/view``). This hook
-     * copies the image to temp and sets the ``image`` widget to the temp
-     * annotated path just before MaskEditor opens. For clipspace entries,
-     * the ``image`` widget already holds the correct path, so no copy is
-     * needed.
-     *
-     * @param {Function} nodeType - The node class constructor.
-     * @param {Object} nodeData - The node definition from /object_info.
-     */
-    async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== NODE_TYPE) return;
-
-        const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
-
-        nodeType.prototype.getExtraMenuOptions = function (_canvas, options) {
-            const r = origGetExtraMenuOptions?.apply(this, arguments);
-
-            const folderPath = findWidget(this, "folder_path")?.value ?? "";
-            if (!folderPath.trim()) return r;
-
-            const idx = options.findIndex(
-                (o) => o && o.content === MASK_EDITOR_MENU_TEXT
-            );
-            if (idx === -1) return r;
-
-            const originalItem = options[idx];
-            const node = this;
-
-            options[idx] = {
-                content: MASK_EDITOR_MENU_TEXT,
-                callback: async () => {
-                    const folderImage = findWidget(node, "folder_image")?.value ?? "";
-                    if (!folderImage.trim()) {
-                        console.warn("[EnhancementUtils] ImageLoader: no folder image selected for MaskEditor.");
-                        return;
-                    }
-
-                    // For annotated entries (clipspace masks, pasted images),
-                    // the image widget already has the right path and the
-                    // file is already addressable via /view -- just open
-                    // MaskEditor directly.
-                    if (!isAnnotatedPath(folderImage)) {
-                        // Real folder image: copy to temp so MaskEditor
-                        // can address it via /view.
-                        const tempRef = await copyToTemp(folderPath, folderImage);
-                        if (!tempRef) {
-                            console.warn("[EnhancementUtils] ImageLoader: copy_to_temp failed.");
-                            return;
-                        }
-
-                        const annotatedPath =
-                            (tempRef.subfolder ? tempRef.subfolder + "/" : "") +
-                            tempRef.filename +
-                            (tempRef.type ? ` [${tempRef.type}]` : "");
-
-                        const imageWidget = findWidget(node, "image");
-                        if (imageWidget) {
-                            node._settingImageFromFolder = true;
-                            imageWidget.value = annotatedPath;
-                            node._settingImageFromFolder = false;
-                        }
-                    }
-
-                    // Open MaskEditor normally.
-                    originalItem.callback();
-                },
-            };
-
-            return r;
-        };
-    },
-
-    /**
-     * Set up each new node instance: add the info widget, wire callbacks
-     * for folder_path / folder_image, install the image widget accessor,
-     * sync visibility, and load the initial preview.
+     * Set up each new node instance: wire callbacks for folder_path /
+     * folder_image, install the image widget accessor, sync visibility, and
+     * load the initial folder listing.
      *
      * @param {Object} node - The newly created node instance.
      */
@@ -887,7 +702,6 @@ app.registerExtension({
             const origCallback = folderImageCombo.callback;
             folderImageCombo.callback = function (value) {
                 origCallback?.call(this, value);
-                // Copy to temp + set image widget + preview.
                 handleFolderImageChange(node, value);
             };
         }
@@ -897,8 +711,6 @@ app.registerExtension({
             const fp = folderWidget?.value ?? "";
             syncWidgetVisibility(node, fp);
 
-            // Install the image widget accessor to detect MaskEditor saves
-            // and clipspace pastes.
             const imageWidget = findWidget(node, "image");
             if (imageWidget) {
                 installImageWidgetAccessor(node, imageWidget);
@@ -910,12 +722,6 @@ app.registerExtension({
 
             if (fp.trim()) {
                 refreshFolderCombo(node);
-
-                // The core IMAGEUPLOAD widget schedules its own rAF that may
-                // paint the (hidden) ``image`` widget's preview. Re-assert the
-                // folder preview a tick later so we deterministically win that
-                // race on page load, tab switch, and subgraph rebuild.
-                requestAnimationFrame(() => updatePreview(node));
             }
         });
     },
@@ -963,9 +769,15 @@ app.registerExtension({
     },
 
     /**
-     * Scrub the leaked ``folder_path`` value on old-format nodes.
+     * Runs per node after widget values are restored, before the frontend's
+     * missing-media scan.
      *
-     * For nodes flagged by ``beforeConfigureGraph``, ComfyUI's positional
+     * 1. Folder-mode nodes: register the saved mirrored ``image`` value as a
+     *    combo option so the scan doesn't report "Media input missing" (see
+     *    ``setMirroredImageOption``).
+     * 2. Old-format nodes: scrub the leaked ``folder_path`` value.
+     *
+     * For old-format nodes flagged by ``beforeConfigureGraph``, ComfyUI's positional
      * ``widgets_values`` restore put the old ``upload`` value (the literal
      * string ``"image"``) onto the ``folder_path`` widget. Clear it so the
      * node returns to its default (dropdown) mode. Only the exact leaked
@@ -977,15 +789,22 @@ app.registerExtension({
      */
     loadedGraphNode(node) {
         if (node?.comfyClass !== NODE_TYPE) return;
-        if (!oldFormatNodeIds.has(node.id)) return;
-
-        oldFormatNodeIds.delete(node.id);
 
         const folderWidget = findWidget(node, "folder_path");
-        if (folderWidget && folderWidget.value === "image") {
-            folderWidget.value = "";
-            // Return the node to default (dropdown) mode.
-            syncWidgetVisibility(node, "");
+
+        if (oldFormatNodeIds.has(node.id)) {
+            oldFormatNodeIds.delete(node.id);
+            if (folderWidget && folderWidget.value === "image") {
+                folderWidget.value = "";
+                // Return the node to default (dropdown) mode.
+                syncWidgetVisibility(node, "");
+            }
+        }
+
+        const imageWidget = findWidget(node, "image");
+        const imageValue = imageWidget?.value;
+        if (folderWidget?.value?.trim() && typeof imageValue === "string" && imageValue.trim()) {
+            setMirroredImageOption(node, imageWidget, imageValue);
         }
     },
 });
