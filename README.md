@@ -19,6 +19,7 @@ Real-time system stats displayed as horizontal colored bars in the ComfyUI menu 
 | **CPU** | Amber | Utilization % |
 | **RAM** | Green | Used / total (tooltip shows bytes) |
 | **Disk** | Muted purple | Usage for a selected partition |
+| **IO** | Bright purple | Disk I/O activity across all disks: % of time the busiest disk is busy (like Task Manager's Disk %); tooltip shows which disk and total read/write speeds. Off by default; enable with **Show disk I/O activity** |
 | **GPU** | Blue | Utilization % (NVIDIA only) |
 | **VRAM** | Teal | Used / total, max-used tracking in tooltip |
 | **Temp** | Green-to-red gradient | GPU temperature in degrees |
@@ -55,6 +56,8 @@ Badges also display inside subgraphs:
 <img src="docs/images/profiling_subgraph_inside.png" width="700" alt="Profiling badges inside a subgraph">
 
 Enabled by default. Toggle in ComfyUI Settings: **Node Profiler - Enabled**.
+
+A per-node summary is also logged to the server console after each run. Turn it off with **Node Profiler - Console summary** (the badges keep working).
 
 To access profiling data programmatically within your workflow (e.g., for logging or conditional logic), use the [Profiler Timing](#profiler-timing) node. It can read the execution time of any node by linking to it or specifying its ID.
 

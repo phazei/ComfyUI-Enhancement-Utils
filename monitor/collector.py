@@ -48,7 +48,7 @@ class MonitorCollector:
         self._lock = threading.Lock()
 
         # ── History Storage ─────────────────────────────────────────
-        # Keys: "cpu", "ram", "disk", "gpu_0", "vram_0", "temp_0", "power_0", etc.
+        # Keys: "cpu", "ram", "disk", "diskio", "gpu_0", "vram_0", "temp_0", "power_0", etc.
         # Values: list of {"t": float (epoch seconds), "v": float (metric value)}
         # Appended from the daemon thread, read from HTTP handler threads.
         # Python's GIL makes list.append() and list copy thread-safe.
@@ -174,6 +174,9 @@ class MonitorCollector:
                 if data.get("disk_path") and data["disk_path"] != "none":
                     if data.get("disk_used_percent", -1) >= 0:
                         self._append_history("disk", now, data["disk_used_percent"])
+
+                if data.get("disk_io_percent", -1) >= 0:
+                    self._append_history("diskio", now, data["disk_io_percent"])
 
                 for i, gpu in enumerate(data.get("gpus", [])):
                     if gpu.get("gpu_utilization", -1) >= 0:

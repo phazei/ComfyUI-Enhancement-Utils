@@ -32,6 +32,11 @@ logger = logging.getLogger("enhutils.profiler")
 
 # ── Per-Prompt State ───────────────────────────────────────────────────────
 
+console_summary_enabled: bool = True
+"""Log the per-node summary to the console when execution ends. Set by the
+frontend's ``EnhUtils.Profiler.ConsoleSummary`` setting via
+``PATCH /enhutils/profiler/settings``."""
+
 _state: dict | None = None
 """
 Mutable dict holding timing data for the currently executing prompt:
@@ -94,7 +99,7 @@ def _emit_execution_end(prompt_server, sid) -> None:
     total_time_ms = int(total_time_s * 1000)
 
     # ── Console Summary ────────────────────────────────────────────
-    if _state["node_times"]:
+    if console_summary_enabled and _state["node_times"]:
         lines = []
         for exec_id, elapsed in _state["node_times"].items():
             class_type = _state["node_classes"].get(exec_id, "?")

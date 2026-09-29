@@ -1,8 +1,8 @@
 /**
  * Resource Monitor frontend extension.
  *
- * Displays real-time system stats (CPU, RAM, HDD, GPU utilization, VRAM,
- * temperature, power draw) as horizontal colored bars in the ComfyUI menu bar.
+ * Displays real-time system stats (CPU, RAM, HDD space, disk I/O activity,
+ * GPU utilization, VRAM, temperature, power draw) as horizontal colored bars in the ComfyUI menu bar.
  * Hovering over any bar shows a single historical sparkline graph popup.
  * Clicking any bar pins a multi-chart grid showing all metrics at once;
  * clicking again (or clicking outside) dismisses it.
@@ -48,6 +48,7 @@ const BASE_METRICS = [
     { id: "cpu",  label: "CPU",   symbol: "%",  cssClass: "cpu" },
     { id: "ram",  label: "RAM",   symbol: "%",  cssClass: "ram" },
     { id: "disk", label: "Disk",  symbol: "%",  cssClass: "disk" },
+    { id: "diskio", label: "IO",  symbol: "%",  cssClass: "diskio" },
 ];
 
 /** Bar colors (must match CSS). Used for the graph popup line color. */
@@ -55,6 +56,7 @@ const BAR_COLORS = {
     cpu:   "#E8960C",
     ram:   "#0AA015",
     disk:  "#6B5B7B",
+    diskio: "#A855C8",
     gpu:   "#0C86F4",
     vram:  "#0EA5A5",
     temp:  "#FF6600",  // Dynamic in bar, but use orange as the chart color.
@@ -100,6 +102,17 @@ function formatBytes(bytes) {
     const units = ["B", "KB", "MB", "GB", "TB"];
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
     return (bytes / Math.pow(1024, i)).toFixed(2) + " " + units[i];
+}
+
+/**
+ * Format a throughput in bytes/second (e.g., "120.50 MB/s").
+ * @param {number} bps - Bytes per second; negative means unavailable.
+ * @returns {string}
+ */
+function formatRate(bps) {
+    if (!(bps >= 0)) return "n/a";
+    if (bps < 1) return "0 B/s";
+    return formatBytes(bps) + "/s";
 }
 
 /**
@@ -555,6 +568,10 @@ app.registerExtension({
         registerBarHover("disk", bars.disk, {
             color: BAR_COLORS.disk, label: "Disk", unit: "%", yMax: 100, getExtra: null,
         });
+        registerBarHover("diskio", bars.diskio, {
+            color: BAR_COLORS.diskio, label: "Disk I/O (busiest disk)", unit: "%", yMax: 100,
+            getExtra: () => diskIoRates,
+        });
 
         // Register per-GPU bar hovers.
         for (const gpu of gpuList) {
@@ -626,6 +643,9 @@ app.registerExtension({
         /** Current disk label, updated when the disk setting changes. */
         let diskLabel = "Disk";
 
+        /** Latest disk read/write rates line, shown in the I/O tooltip and graph popup. */
+        let diskIoRates = "";
+
         /** Tracks the last known power limit per GPU to set graph yMax. */
         const powerLimits = {};
 
@@ -652,7 +672,7 @@ app.registerExtension({
             }
 
             // Disk: show -1 (hidden) when path is "none" or no data.
-            const diskPercent = (data.disk_path && data.disk_path !== "none")
+            const diskPercent = (enabled.disk && data.disk_path && data.disk_path !== "none")
                 ? data.disk_used_percent
                 : -1;
             updateMonitorBar(bars.disk, diskLabel, diskPercent, "%", {
@@ -661,6 +681,20 @@ app.registerExtension({
             });
             if (diskPercent >= 0) {
                 ensureHistory("disk").push(diskPercent);
+            }
+
+            // Disk I/O activity across all disks: busiest disk's active time,
+            // throughput summed. -1 (hidden) when disabled or on the first
+            // sample after a (re)start.
+            const ioPercent = enabled.diskio ? (data.disk_io_percent ?? -1) : -1;
+            updateMonitorBar(bars.diskio, "IO", ioPercent);
+            if (ioPercent >= 0) {
+                diskIoRates = `Read ${formatRate(data.disk_read_bps)} / Write ${formatRate(data.disk_write_bps)}`;
+                const busiest = data.disk_io_path
+                    ? `Busiest: ${data.disk_io_path} ${ioPercent.toFixed(1)}%`
+                    : `Active: ${ioPercent.toFixed(1)}%`;
+                bars.diskio.element.title = `Disk I/O (all disks)\n${busiest}\n${diskIoRates}`;
+                ensureHistory("diskio").push(ioPercent);
             }
 
             // Per-GPU metrics.
@@ -785,10 +819,10 @@ app.registerExtension({
         //
         // NOTE: ComfyUI renders settings in reverse registration order,
         // so we register bottom-to-top. Desired display order:
-        //   Rate, History, CPU, RAM, Disk, GPU, VRAM, Temp, Power, Cost, Currency
+        //   Rate, History, CPU, RAM, Disk, Disk I/O, GPU, VRAM, Temp, Power, Cost, Currency
 
         /** Track which metrics are enabled so the WS listener can respect them. */
-        const enabled = { cpu: true, ram: true };
+        const enabled = { cpu: true, ram: true, disk: true, diskio: false };
         const gpuEnabled = {};
 
         // ── Electricity cost settings (registered first = displayed last) ──
@@ -929,9 +963,48 @@ app.registerExtension({
 
         diskLabel = getDiskLabel(defaultDisk);
 
+        // Registered before the partition setting so they display right after
+        // it (reverse order): partition, Show disk usage, Show disk I/O.
+        app.ui.settings.addSetting({
+            id: "EnhUtils.Monitor.ShowDiskIO",
+            name: "Resource Monitor - Show disk I/O activity",
+            type: "boolean",
+            defaultValue: false,
+            tooltip: "How busy your disks are (like Task Manager's Disk %), across all " +
+                "disks: shows the busiest one. Hover for which disk and total read/write speeds.",
+            onChange: async (value) => {
+                enabled.diskio = value;
+                if (!value) updateMonitorBar(bars.diskio, "IO", -1);
+                try {
+                    await api.fetchApi(`${API_BASE}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ switchDiskIO: value }),
+                    });
+                } catch (e) { /* ignore */ }
+            },
+        });
+
+        app.ui.settings.addSetting({
+            id: "EnhUtils.Monitor.ShowDisk",
+            name: "Resource Monitor - Show disk usage",
+            type: "boolean",
+            defaultValue: true,
+            tooltip: "Show how full the selected disk partition is.",
+            onChange: async (value) => {
+                enabled.disk = value;
+                if (!value) updateMonitorBar(bars.disk, diskLabel, -1);
+                try {
+                    await api.fetchApi(`${API_BASE}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ switchDisk: value }),
+                    });
+                } catch (e) { /* ignore */ }
+            },
+        });
+
         app.ui.settings.addSetting({
             id: "EnhUtils.Monitor.WhichDisk",
-            name: "Resource Monitor - Disk partition (select 'none' to hide)",
+            name: "Resource Monitor - Disk usage partition (select 'none' to hide)",
             type: "combo",
             defaultValue: defaultDisk,
             options: partitions,

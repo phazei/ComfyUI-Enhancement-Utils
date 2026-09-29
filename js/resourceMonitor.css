@@ -104,6 +104,7 @@
 .enhutils-monitor.cpu .enhutils-slider   { background: #E8960C; }  /* Amber/Orange */
 .enhutils-monitor.ram .enhutils-slider   { background: #0AA015; }  /* Green */
 .enhutils-monitor.disk .enhutils-slider  { background: #6B5B7B; }  /* Muted gray-purple */
+.enhutils-monitor.diskio .enhutils-slider { background: #A855C8; } /* Bright purple */
 .enhutils-monitor.gpu .enhutils-slider   { background: #0C86F4; }  /* Blue */
 .enhutils-monitor.vram .enhutils-slider  { background: #0EA5A5; }  /* Teal */
 .enhutils-monitor.power .enhutils-slider { background: #E05020; }  /* Red-orange */

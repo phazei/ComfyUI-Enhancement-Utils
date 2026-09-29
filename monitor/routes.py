@@ -32,6 +32,8 @@ async def update_settings(request: web.Request) -> web.Response:
         switchCPU (bool): Enable/disable CPU monitoring.
         switchRAM (bool): Enable/disable RAM monitoring.
         switchDisk (bool): Enable/disable disk monitoring.
+        switchDiskIO (bool): Enable/disable disk I/O activity monitoring
+            (all disks; busiest disk's active time, summed throughput).
         whichDisk (str): Disk partition to monitor (mount point), or "none" to hide.
     """
     try:
@@ -47,6 +49,9 @@ async def update_settings(request: web.Request) -> web.Response:
         hw.ram_enabled = bool(body["switchRAM"])
     if "switchDisk" in body:
         hw.disk_enabled = bool(body["switchDisk"])
+    if "switchDiskIO" in body:
+        hw.disk_io_enabled = bool(body["switchDiskIO"])
+
     if "whichDisk" in body:
         hw.disk_path = str(body["whichDisk"])
 

@@ -66,6 +66,7 @@ This is NOT a kitchen-sink package. Features are included because they fill real
 - **Non-NVIDIA fallback**: when pynvml is missing or reports 0 devices, `GPUMonitor._init_torch_fallback()` reports VRAM only for ComfyUI's torch device via `comfy.model_management` (`get_total_memory` / `get_free_memory`), covering AMD ROCm, ZLUDA and Intel XPU. Skipped for CPU/MPS/DirectML, which report system RAM or a placeholder. `get_gpu_list()` marks these devices `vram_only: true`; the frontend uses that to skip creating the utilization/temp/power bars, their hover registration (`registerBarHover` would throw on an undefined bar) and their settings toggles
 - Note `get_free_memory()` counts torch's cached-but-unused memory as free, so the fallback VRAM number tracks what ComfyUI can allocate, not what the OS reports
 - GPU names decoded with `errors='replace'` (some drivers return non-UTF-8)
+- Disk I/O activity (`monitor/diskio.py`) across all mounted disks: `AllDisksIOMonitor` runs one `DiskIOMonitor` per disk (list refreshed every 30s) and reports the busiest disk's active % (`disk_io_path`) with read/write summed. Independent of the disk-usage `disk_path`. Per disk, Windows uses PDH counters via ctypes (`\LogicalDisk(D:)\% Idle Time`, active = 100 - idle, plus read/write bytes/sec); Linux uses the psutil `busy_time` delta for the mount's block device; otherwise the busiest disk's `read_time + write_time`. Rate counters need a baseline, so the first sample after start / disk change / re-enable is -1 (bar hidden). Sampled only from the monitor thread.
 - Power draw via `pynvml.nvmlDeviceGetPowerUsage()` / `nvmlDeviceGetEnforcedPowerLimit()` (milliwatts, divide by 1000)
 - **History** stored in-memory on `MonitorCollector.history` (dict of metric key -> list of `{t, v}` dicts). Survives browser refresh, lost on ComfyUI restart. Endpoints: `GET /enhutils/monitor/history`, `POST /enhutils/monitor/history/clear`
 - **Electricity cost** accumulated server-side as `MonitorCollector.total_watt_seconds` (all GPUs combined). Included in every WS push as `total_watt_seconds`. Reset on history clear.
@@ -79,7 +80,7 @@ This is NOT a kitchen-sink package. Features are included because they fill real
   - `execution.execute` wrapper fires after each node to compute elapsed time
   - Handles both sync and async `execution.execute` via `inspect.iscoroutinefunction`
   - Emits `enhutils.profiler.executed` (per-node) and `enhutils.profiler.execution_end` (total) via WebSocket
-  - Console summary logged via `logging.getLogger("enhutils.profiler")`
+  - Console summary logged via `logging.getLogger("enhutils.profiler")`, gated by `hooks.console_summary_enabled` (set from the `EnhUtils.Profiler.ConsoleSummary` setting via `PATCH /enhutils/profiler/settings`; the setting's `onChange` fires on page load, so it resyncs after a server restart once a browser connects)
   - Public API: `get_elapsed()`, `get_node_time(exec_id)`, `get_all_times()` in `profiler/hooks.py`
   - HTTP endpoint: `GET /enhutils/profiler/results` (`profiler/routes.py`) returns `node_times`, `node_classes`, `prompt_id`, `total_elapsed` as JSON
 - **ProfilerTiming node** (`nodes/profiler_timing.py`):

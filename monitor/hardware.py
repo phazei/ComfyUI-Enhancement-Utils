@@ -1,7 +1,8 @@
 """
 Hardware stats collector.
 
-Gathers CPU utilization, RAM usage, and disk usage via psutil.
+Gathers CPU utilization, RAM usage, and disk usage via psutil, and disk I/O
+activity via :mod:`.diskio`.
 Delegates GPU stats to the GPUMonitor.
 
 Improvements over Crystools:
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 
 import psutil
 
+from .diskio import AllDisksIOMonitor
 from .gpu import GPUMonitor, GPUInfo
 
 logger = logging.getLogger("enhutils.monitor.hardware")
@@ -38,6 +40,10 @@ class SystemStats:
     disk_used: int = 0
     disk_used_percent: float = -1.0
     disk_path: str = ""
+    disk_io_percent: float = -1.0
+    disk_read_bps: float = -1.0
+    disk_write_bps: float = -1.0
+    disk_io_path: str = ""
     gpu_info: GPUInfo = None
 
     def to_dict(self) -> dict:
@@ -66,6 +72,10 @@ class SystemStats:
             "disk_used": self.disk_used,
             "disk_used_percent": self.disk_used_percent,
             "disk_path": self.disk_path,
+            "disk_io_percent": self.disk_io_percent,
+            "disk_read_bps": self.disk_read_bps,
+            "disk_write_bps": self.disk_write_bps,
+            "disk_io_path": self.disk_io_path,
             "device_type": device_type,
             "gpus": gpu_list,
         }
@@ -126,6 +136,8 @@ class HardwareInfo:
         self.cpu_enabled = True
         self.ram_enabled = True
         self.disk_enabled = True
+        self.disk_io_enabled = False  # Opt-in via the "Show disk I/O activity" setting.
+        self.disk_io = AllDisksIOMonitor()
 
         # Which disk to monitor. "none" disables disk monitoring.
         # Default: auto-detect the drive ComfyUI is installed on.
@@ -189,6 +201,18 @@ class HardwareInfo:
                 stats.disk_path = self.disk_path
             except Exception:
                 pass
+
+        # Disk I/O activity across all disks (busiest disk's active time,
+        # summed throughput). Independent of the disk-usage partition.
+        # Disabling releases the counters so re-enabling starts fresh.
+        if self.disk_io_enabled:
+            sample = self.disk_io.sample()
+            stats.disk_io_percent = sample.active_percent
+            stats.disk_read_bps = sample.read_bps
+            stats.disk_write_bps = sample.write_bps
+            stats.disk_io_path = self.disk_io.busiest
+        else:
+            self.disk_io.close()
 
         # GPU stats (delegated).
         stats.gpu_info = self.gpu_monitor.get_stats()

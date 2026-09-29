@@ -39,6 +39,7 @@ import { getUniqueIdFromNode, findNodeByExecutionId } from "./utils.js";
 // ═══════════════════════════════════════════════════════════════════════════
 
 const SETTING_ENABLED = "EnhUtils.Profiler.Enabled";
+const SETTING_CONSOLE_SUMMARY = "EnhUtils.Profiler.ConsoleSummary";
 
 let enabled = true;
 const precision = 2;
@@ -429,6 +430,23 @@ app.registerExtension({
 
     setup() {
         // ── Settings ───────────────────────────────────────────────
+        // Registered bottom-to-top (ComfyUI displays them in reverse order).
+
+        app.ui.settings.addSetting({
+            id: SETTING_CONSOLE_SUMMARY,
+            name: "Node Profiler - Console summary",
+            type: "boolean",
+            defaultValue: true,
+            tooltip: "Log the per-node execution profile to the ComfyUI server console " +
+                "after each run. Independent of the badges.",
+            onChange(v) {
+                // Server-side flag; resent on every page load via this onChange.
+                api.fetchApi("/enhutils/profiler/settings", {
+                    method: "PATCH",
+                    body: JSON.stringify({ console_summary: !!v }),
+                }).catch(() => { /* older backend; ignore */ });
+            },
+        });
 
         app.ui.settings.addSetting({
             id: SETTING_ENABLED,
