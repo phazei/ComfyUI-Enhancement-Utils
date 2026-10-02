@@ -170,7 +170,7 @@ To block downstream execution *silently* from a V3 node, the blocker must be a p
 - `folder_paths.get_annotated_filepath(image)` handles subfolder-style paths like `sub/image.png` correctly
 - Custom-folder previews/MaskEditor: the JS mirrors `folder_image` into the hidden `image` widget as a `/view` path and fires its core callback (the only reactive preview path reachable from plain JS). Folders outside `input/` use a virtual `__enhutils__/<hash>` subfolder served in place by `middleware.py` -> `serve_virtual_view()` in `nodes/image_load_routes.py`. Nothing is copied.
 - Folder allowlist: `allowed_folders.txt` (gitignored; template `allowed_folders.rename.txt`) and/or `ENHUTILS_ALLOWED_FOLDERS` (comma-separated). Missing = unrestricted, empty = input only; both present = intersection. Enforced in `_resolve_folder` / `_resolve_folder_image` (covers `/list`, execute, validate, fingerprint) and re-checked per virtual `/view` request. Never resolve custom-folder paths without going through these.
-- WebP EXIF metadata uses `piexif` -- it's lightweight but can fail on malformed data (always try/except)
+- WebP and AVIF metadata is read with Pillow's `img.getexif()` (no piexif). ComfyUI uses the same EXIF layout for both (`_ui.py` `_create_webp_metadata`, `nodes_images.py` `_avif_exif`): it writes `"prompt:{json}"` to tag 0x0110 (Model) and each `extra_pnginfo` entry (`"workflow:{json}"`) counting down from 0x010F (Make); `_extract_metadata` parses every `key:json` string in the base IFD and lowercases keys so the legacy `Prompt:`/`Workflow:` form also works. `getexif()` can raise on malformed data -- keep it in try/except
 
 ## Adding New Features
 
@@ -206,7 +206,6 @@ To block downstream execution *silently* from a V3 node, the blocker must be a p
 | Package | Required | Notes |
 |---------|----------|-------|
 | `psutil` | Yes | System monitoring |
-| `piexif` | Yes | WebP EXIF extraction (lightweight) |
 | `nvidia-ml-py` | Optional | NVIDIA GPU monitoring -- provides the `pynvml` module; graceful fallback if missing. (The PyPI package literally named `pynvml` is a deprecated shim -- point users to `nvidia-ml-py`.) |
 | `Pillow`, `torch`, `numpy` | Yes | Bundled with ComfyUI |
 

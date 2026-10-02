@@ -27,13 +27,6 @@ import node_helpers
 
 from comfy_api.latest import io
 
-# Optional piexif for WebP EXIF metadata extraction.
-try:
-    import piexif
-    HAS_PIEXIF = True
-except ImportError:
-    HAS_PIEXIF = False
-
 
 # ── File Discovery ──────────────────────────────────────────────────────────
 
@@ -272,34 +265,29 @@ def _extract_metadata(image_path: str, img: Image.Image) -> tuple[dict, dict]:
             # 'prompt' and 'workflow' chunks land here alongside any others.
             metadata[key] = parsed
 
-    # WebP: metadata may be stored in EXIF tags (ComfyUI convention).
-    elif img.format == "WEBP" and HAS_PIEXIF:
+    # WebP/AVIF: ComfyUI stores "key:json" strings in base-IFD EXIF tags --
+    # "prompt:{...}" in 0x0110 (Model) and each extra_pnginfo entry
+    # ("workflow:{...}") counting down from 0x010F (Make). Older tools used
+    # capitalized "Prompt:"/"Workflow:", so keys are lowercased.
+    elif img.format in ("WEBP", "AVIF"):
         try:
-            exif_data = piexif.load(image_path)
-            # Tag 271 (Make) is used by some tools to store prompt data.
-            if "0th" in exif_data and piexif.ImageIFD.Make in exif_data["0th"]:
-                raw = exif_data["0th"][piexif.ImageIFD.Make]
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")
-                text = raw.replace("Prompt:", "", 1).strip()
-                try:
-                    metadata["prompt"] = json.loads(text)
-                except (json.JSONDecodeError, ValueError):
-                    metadata["prompt_raw"] = text
-
-            # Tag 270 (ImageDescription) is used for workflow data.
-            if "0th" in exif_data and piexif.ImageIFD.ImageDescription in exif_data["0th"]:
-                raw = exif_data["0th"][piexif.ImageIFD.ImageDescription]
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8", errors="replace")
-                text = raw.replace("Workflow:", "", 1).strip()
-                try:
-                    metadata["workflow"] = json.loads(text)
-                except (json.JSONDecodeError, ValueError):
-                    metadata["workflow_raw"] = text
+            exif = img.getexif()
         except Exception:
-            # piexif can fail on malformed EXIF data; silently skip.
-            pass
+            # Malformed EXIF data; skip it.
+            exif = {}
+        for value in exif.values():
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            if not isinstance(value, str) or ":" not in value:
+                continue
+            key, _, text = value.partition(":")
+            key = key.strip().lower()
+            if not key.isidentifier():
+                continue
+            try:
+                metadata[key] = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                metadata[f"{key}_raw"] = text.strip()
 
     # JPEG: extract standard EXIF tags.
     elif img.format == "JPEG":
@@ -317,7 +305,7 @@ def _extract_metadata(image_path: str, img: Image.Image) -> tuple[dict, dict]:
 
 class ImageLoadWithSubfolders(io.ComfyNode):
     """Loads an image from the input directory (with recursive subfolder support)
-    and extracts embedded metadata (prompt, workflow) from PNG and WebP files."""
+    and extracts embedded metadata (prompt, workflow) from PNG, WebP and AVIF files."""
 
     @classmethod
     def define_schema(cls):
@@ -325,7 +313,7 @@ class ImageLoadWithSubfolders(io.ComfyNode):
             node_id="EnhancementUtils_ImageLoadWithSubfolders",
             display_name="Load Image (With Subfolders)",
             description="Loads an image from the input directory with recursive subfolder browsing. "
-                        "Also extracts embedded prompt/workflow metadata from PNG and WebP files.",
+                        "Also extracts embedded prompt/workflow metadata from PNG, WebP and AVIF files.",
             category="image",
             inputs=[
                 io.Combo.Input(

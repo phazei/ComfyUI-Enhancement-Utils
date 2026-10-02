@@ -195,7 +195,7 @@ Both `node_link` and `node_ids` are additive -- their resolved times are summed 
 
 **Category: image** | **Node: Load Image (With Subfolders)**
 
-An enhanced image loader that recursively scans for images (including all subfolders) and extracts embedded metadata from PNG and WebP files. It works in two modes:
+An enhanced image loader that recursively scans for images (including all subfolders) and extracts embedded metadata from PNG, WebP and AVIF files. It works in two modes:
 
 - **Default mode** -- pick from the ComfyUI input directory via the `image` dropdown (recursively scanned, subfolders shown as `subfolder/filename.png`).
 - **Custom-folder mode** -- set `folder_path` to any folder on disk and pick from it via the `folder_image` dropdown.
@@ -212,7 +212,7 @@ Setting `folder_path` switches to custom-folder mode and overrides the `image` d
 |--------|------|-------------|
 | image | IMAGE | The loaded image tensor. Supports multi-frame (GIF, APNG, TIFF), 16-bit, and palette transparency. |
 | mask | MASK | Alpha mask (or zeros if no alpha channel). |
-| metadata | STRING | Full embedded metadata as JSON, including `prompt` and `workflow` (PNG text chunks, WebP EXIF, JPEG EXIF). Empty `{}` if none found. |
+| metadata | STRING | Full embedded metadata as JSON, including `prompt` and `workflow` (PNG text chunks, WebP/AVIF EXIF, JPEG EXIF). Empty `{}` if none found. |
 | imagedata | STRING | File stats as JSON: `filename`, `path` (directory only), `width`, `height`, `resolution`, `size_bytes`. |
 
 > **Breaking change (v1.3.0+)** -- the standalone `prompt` output was removed. The embedded prompt now lives inside the `metadata` JSON (alongside `workflow`). Use the **Parse JSON (EnhUtils)** node to pull values back out as structured objects.
@@ -228,7 +228,7 @@ Improvements over other image loaders:
 - **Multi-frame support** -- handles animated GIF/APNG, multi-page TIFF, MPO format
 - **16-bit image support** -- properly normalizes `I` mode images
 - **Palette transparency** -- handles `P` mode images with transparency info
-- **Metadata extraction** -- PNG text chunks, WebP EXIF (via piexif), JPEG EXIF
+- **Metadata extraction** -- PNG text chunks, WebP/AVIF EXIF (ComfyUI `prompt`/`workflow` tags), JPEG EXIF
 - **SHA-256 caching** -- only re-executes when the file on disk actually changes
 - Excludes system files (`Thumbs.db`, `.DS_Store`, `desktop.ini`), dot-folders, and the `clipspace` temp folder
 
@@ -327,10 +327,9 @@ pip install nvidia-ml-py
 
 | Package | Required | Purpose |
 |---------|----------|---------|
-| `psutil` | Yes | CPU, RAM, and disk monitoring |
-| `piexif` | Yes | WebP EXIF metadata extraction |
+| `psutil` | Yes (bundled with ComfyUI) | CPU, RAM, and disk monitoring |
 | `nvidia-ml-py` | Optional | NVIDIA GPU monitoring via the `pynvml` module (graceful fallback if missing) |
-| `Pillow` | Yes (bundled with ComfyUI) | Image loading |
+| `Pillow` | Yes (bundled with ComfyUI) | Image loading and EXIF metadata extraction |
 | `torch`, `numpy` | Yes (bundled with ComfyUI) | Tensor operations |
 
 Vendored JavaScript libraries (no npm/build step required):
