@@ -364,6 +364,12 @@ function syncWidgetVisibility(node, folderPath) {
 
     node._wasFolderMode = hasFolder;
     node.graph?.setDirtyCanvas?.(true, true);
+
+    // Nodes 2.0 reads ``options.hidden`` inside a computed that only tracks
+    // the widget value store, so a raw ``hidden`` write is invisible until
+    // something else re-renders the node (e.g. a paste). Bump a widget value
+    // to force the recompute. ``folder_image`` has no value accessor of ours.
+    forceWidgetReactiveUpdate(node, folderImageWidget);
 }
 
 // ── Combo + Info Updates ───────────────────────────────────────────────────
@@ -402,6 +408,9 @@ function applyImageList(node, images) {
 
     // Kick any connected Primitive to re-read the live combo values.
     refreshConnectedPrimitives(node);
+
+    // Nodes 2.0 doesn't see the raw options.values mutation above.
+    forceWidgetReactiveUpdate(node, combo);
 }
 
 // ── Image Widget Mirroring (Preview + MaskEditor) ──────────────────────────
@@ -743,13 +752,14 @@ app.registerExtension({
         }
 
         // ── Initial setup (deferred so injected widgets like 'upload' exist) ─
-        requestAnimationFrame(() => {
+        const setup = () => {
             const fp = folderWidget?.value ?? "";
             syncWidgetVisibility(node, fp);
 
             const imageWidget = findWidget(node, "image");
-            if (imageWidget) {
+            if (imageWidget && !node._imageAccessorInstalled) {
                 installImageWidgetAccessor(node, imageWidget);
+                node._imageAccessorInstalled = true;
             }
 
             // Override GET_CONFIG on the folder_image input so Primitive
@@ -757,9 +767,26 @@ app.registerExtension({
             installFolderImageGetConfig(node);
 
             if (fp.trim()) {
+                // Keep the restored mirrored value a valid option (paste and
+                // other non-workflow-load paths skip loadedGraphNode).
+                const iv = imageWidget?.value;
+                if (typeof iv === "string" && iv.trim()) {
+                    setMirroredImageOption(node, imageWidget, iv);
+                }
                 refreshFolderCombo(node);
             }
-        });
+        };
+        requestAnimationFrame(setup);
+
+        // Copy/paste (and clone) apply widget values via configure(), which
+        // can land after the rAF above saw an empty folder_path. Re-run setup
+        // once the restored values are in place.
+        const origOnConfigure = node.onConfigure;
+        node.onConfigure = function (...args) {
+            const r = origOnConfigure?.apply(this, args);
+            requestAnimationFrame(setup);
+            return r;
+        };
     },
 
     /**
