@@ -29,6 +29,11 @@
  *    Re-opening MaskEditor on a ``clipspace-painted-masked-`` entry reloads
  *    the existing mask automatically from alpha.
  *
+ * 5. **Folder picker** -- a non-serialized button under ``folder_path``
+ *    opens a LiteGraph context menu of subfolders (of the current
+ *    ``folder_path``, or ``input/``) from ``/enhutils/image_loader/subfolders``.
+ *    The text field stays free-form.
+ *
  * Refresh triggers:
  * - Node creation (if folder_path already has a value from a loaded workflow).
  * - ``folder_path`` widget value change (on confirm / blur).
@@ -710,6 +715,119 @@ function walkGraph(graph, callback) {
     }
 }
 
+// ── Folder Picker ──────────────────────────────────────────────────────────
+
+/** Label of the picker button widget. */
+const PICKER_LABEL = "📁 browse folders";
+
+/**
+ * Last pointerdown event, used to position the picker menu. Button widget
+ * callbacks don't receive a DOM event in the Nodes 2.0 renderer, and
+ * LiteGraph's ContextMenu only accepts a real MouseEvent/PointerEvent.
+ *
+ * @type {PointerEvent|null}
+ */
+let lastPointerEvent = null;
+window.addEventListener("pointerdown", (e) => { lastPointerEvent = e; }, true);
+
+/**
+ * Set ``folder_path`` and fire its callback (refreshes combo, visibility, preview).
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {string} value - New folder_path value.
+ */
+function setFolderPath(node, value) {
+    const folderWidget = findWidget(node, "folder_path");
+    if (!folderWidget) return;
+    folderWidget.value = value;
+    folderWidget.callback?.(value);
+    node.graph?.setDirtyCanvas?.(true, true);
+}
+
+/**
+ * Open a menu listing the subfolders of *browsePath* (default: the current
+ * ``folder_path``, or the input directory). Picking a subfolder or allowlist
+ * root sets ``folder_path``; ".." re-opens the menu one level up without
+ * changing anything.
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ * @param {string} [browsePath] - Folder to browse; defaults to folder_path.
+ * @param {MouseEvent|null} [event] - Event used to position the menu.
+ */
+async function openFolderPicker(node, browsePath, event = lastPointerEvent) {
+    const path = browsePath ?? (findWidget(node, "folder_path")?.value ?? "").trim();
+    let data;
+    try {
+        const resp = await api.fetchApi(
+            `/enhutils/image_loader/subfolders?path=${encodeURIComponent(path)}`
+        );
+        data = await resp.json();
+        if (!resp.ok) {
+            if (data?.not_allowed) showNotAllowedToast(path);
+            else console.warn("[EnhancementUtils] ImageLoader: subfolder request failed:", data?.error);
+            return;
+        }
+    } catch (err) {
+        console.warn("[EnhancementUtils] ImageLoader: subfolder fetch error:", err);
+        return;
+    }
+
+    const items = [];
+    if (data.parent !== null && data.parent !== undefined) {
+        items.push({ content: "⬆ ..", callback: () => openFolderPicker(node, data.parent, event) });
+    }
+    // An empty value is the input directory itself: selecting it clears
+    // folder_path, returning the node to default (input dropdown) mode.
+    items.push({
+        content: data.value ? "✔ use this folder" : "✔ use input folder (default mode)",
+        callback: () => setFolderPath(node, data.value ?? ""),
+    });
+    if (items.length) items.push(null);
+    for (const f of data.folders ?? []) {
+        items.push({ content: `📁 ${f.name}`, callback: () => setFolderPath(node, f.value) });
+    }
+    if (!data.folders?.length) items.push({ content: "(no subfolders)", disabled: true });
+    if (data.truncated) items.push({ content: "… (list truncated)", disabled: true });
+    if (data.roots?.length) {
+        items.push(null);
+        for (const root of data.roots) {
+            items.push({ content: `📌 ${root}`, callback: () => setFolderPath(node, root) });
+        }
+    }
+
+    const LiteGraph = window.LiteGraph;
+    if (!LiteGraph?.ContextMenu) return;
+    new LiteGraph.ContextMenu(items, {
+        title: data.path,
+        event: event ?? undefined,
+        scale: Math.max(1, app.canvas?.ds?.scale ?? 1),
+    });
+}
+
+/**
+ * Add the folder picker button right below ``folder_path``. Not serialized,
+ * so it doesn't shift ``widgets_values`` of saved workflows.
+ *
+ * @param {Object} node - The LiteGraph node instance.
+ */
+function addFolderPickerButton(node) {
+    if (findWidget(node, PICKER_LABEL)) return;
+    const button = node.addWidget("button", PICKER_LABEL, null, () => {
+        openFolderPicker(node);
+    });
+    if (!button) return;
+    button.serialize = false;
+
+    // Move it directly under folder_path.
+    const widgets = node.widgets;
+    const from = widgets.indexOf(button);
+    const to = widgets.findIndex((w) => w.name === "folder_path") + 1;
+    if (from !== -1 && to > 0 && from !== to) {
+        widgets.splice(from, 1);
+        widgets.splice(to, 0, button);
+    }
+}
+
 // ── Extension Registration ─────────────────────────────────────────────────
 
 app.registerExtension({
@@ -739,6 +857,7 @@ app.registerExtension({
                 syncWidgetVisibility(node, value);
                 refreshFolderCombo(node, /* bypassCache */ true, /* notify */ true);
             };
+            addFolderPickerButton(node);
         }
 
         // ── folder_image callback ──────────────────────────────────────

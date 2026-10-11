@@ -5,6 +5,8 @@ Provides:
 - ``GET /enhutils/image_loader/list`` -- list the images in an arbitrary
   folder (for the ``folder_image`` combo), plus the ``view_subfolder`` the
   frontend should use to address them through the standard ``/view`` endpoint.
+- ``GET /enhutils/image_loader/subfolders`` -- list the immediate subfolders
+  of a folder (default: input) for the ``folder_path`` picker button.
 - A ``/view`` middleware that serves files from registered custom folders
   addressed via a virtual subfolder (``__enhutils__/<id>/...``).
 
@@ -36,6 +38,8 @@ import server
 
 from .image_load_subfolders import (
     FolderNotAllowedError,
+    _env_roots,
+    _file_roots,
     _is_within,
     _resolve_folder,
     _scan_image_dir,
@@ -102,6 +106,88 @@ async def list_folder_images(request: web.Request) -> web.Response:
         "count": len(images),
         "images": images,
         "view_subfolder": _register_folder(resolved),
+    })
+
+
+# ── Subfolder Browsing ──────────────────────────────────────────────────────
+
+# Cap on subfolders returned for one directory, so a huge folder can't flood the menu.
+MAX_SUBFOLDERS = 500
+
+
+def _folder_value(resolved: str) -> str:
+    """Return the ``folder_path`` value for a resolved folder.
+
+    Folders inside the input directory are returned input-relative (with
+    ``/`` separators) so workflows stay portable; anything else is absolute.
+    """
+    input_dir = os.path.abspath(folder_paths.get_input_directory())
+    if _is_within(resolved, input_dir):
+        rel = os.path.relpath(resolved, input_dir)
+        return "" if rel == "." else rel.replace("\\", "/")
+    return resolved
+
+
+@server.PromptServer.instance.routes.get("/enhutils/image_loader/subfolders")
+async def list_subfolders(request: web.Request) -> web.Response:
+    """Return the immediate subfolders of a folder, for the folder picker.
+
+    Query params:
+        path (str, optional): Absolute or input-relative folder. Empty, or a
+            path that doesn't exist, browses the input directory instead.
+
+    Returns:
+        JSON ``{"path", "value", "parent", "folders", "roots", "truncated"}``.
+        ``value``/``parent``/each entry's ``value`` are ready to write into
+        ``folder_path``; ``parent`` is null at a filesystem root or when the
+        parent is not allowed. ``roots`` lists the allowlist root folders
+        (empty when there is no allowlist). Subfolders outside the allowlist
+        are omitted. 403 if *path* itself is not allowed.
+    """
+    folder_path = request.query.get("path", "").strip()
+    try:
+        resolved = os.path.abspath(_resolve_folder(folder_path)) if folder_path else None
+    except FolderNotAllowedError as exc:
+        return web.json_response({"error": str(exc), "not_allowed": True}, status=403)
+    except ValueError:
+        resolved = None  # Nonexistent / partially typed path: browse input instead.
+    if resolved is None:
+        resolved = os.path.abspath(folder_paths.get_input_directory())
+
+    folders = []
+    truncated = False
+    try:
+        with os.scandir(resolved) as it:
+            entries = sorted(
+                (e for e in it if not e.name.startswith(".") and e.is_dir()),
+                key=lambda e: e.name.lower(),
+            )
+    except OSError as exc:
+        logger.debug("Could not scan %s: %s", resolved, exc)
+        entries = []
+    for entry in entries:
+        if len(folders) >= MAX_SUBFOLDERS:
+            truncated = True
+            break
+        child = os.path.abspath(entry.path)
+        if is_folder_allowed(child):
+            folders.append({"name": entry.name, "value": _folder_value(child)})
+
+    parent = os.path.dirname(resolved)
+    parent_value = _folder_value(parent) if parent != resolved and is_folder_allowed(parent) else None
+
+    roots = []
+    for root in (_file_roots() or []) + (_env_roots() or []):
+        if os.path.isdir(root) and is_folder_allowed(root) and root not in roots:
+            roots.append(root)
+
+    return web.json_response({
+        "path": resolved,
+        "value": _folder_value(resolved),
+        "parent": parent_value,
+        "folders": folders,
+        "roots": roots,
+        "truncated": truncated,
     })
 
 

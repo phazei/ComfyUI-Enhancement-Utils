@@ -202,6 +202,10 @@ An enhanced image loader that recursively scans for images (including all subfol
 
 Setting `folder_path` switches to custom-folder mode and overrides the `image` dropdown. The node automatically shows only the widgets relevant to the active mode.
 
+The **📁 browse folders** button under `folder_path` opens a menu of subfolders, starting from the current `folder_path` (or the input directory if it's empty). Pick a subfolder to set `folder_path`, use **⬆ ..** to go up a level, or **✔ use this folder** to select the folder you're viewing. If an allowlist is configured, its root folders are listed too. You can still type any path directly.
+
+<img src="docs/images/load_image_subfolders.png" width="500" alt="Load Image (With Subfolders) node with the folder browser menu">
+
 | Input | Type | Description |
 |-------|------|-------------|
 | image | Combo (with upload) | Default mode. Select an image from the input directory. Subfolders are fully supported and shown as `subfolder/filename.png`. |
@@ -219,6 +223,7 @@ Setting `folder_path` switches to custom-folder mode and overrides the `image` d
 
 Improvements over other image loaders:
 - **Custom-folder loading** -- load from any folder on disk (absolute or input-relative) via `folder_path`, scanned recursively
+- **Folder browser** -- pick `folder_path` from a subfolder menu instead of typing it
 - **Recursive subfolder scanning** with `os.walk`
 - **Live preview** -- the selected custom-folder image previews on the node in both renderers, served in place (nothing is copied)
 - **MaskEditor + Paste (Clipspace)** -- supported in custom-folder mode from every MaskEditor entry point; re-opening MaskEditor reloads an existing mask
