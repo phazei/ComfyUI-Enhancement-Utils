@@ -256,15 +256,30 @@ Blocked folders show a warning toast in the UI and fail validation if queued. Su
 
 **Category: utils** | **Node: Parse JSON (EnhUtils)**
 
-Parses a JSON string into a native Python object (list, dict, number, etc.) so it can be consumed by nodes that accept any-type inputs. Pairs well with the `metadata`/`imagedata` outputs of **Load Image (With Subfolders)** and with scripting nodes like [rgthree](https://github.com/rgthree/rgthree-comfy)'s Power Puter.
+Parses one or more JSON strings into a native Python object (dict, list, number, etc.) so it can be consumed by nodes that accept any-type inputs. Pairs well with the `metadata`/`imagedata` outputs of **Load Image (With Subfolders)**, with LLM text output, and with scripting nodes like [rgthree](https://github.com/rgthree/rgthree-comfy)'s Power Puter.
 
 | Input | Type | Description |
 |-------|------|-------------|
-| json_string | String (forced input) | A JSON string to parse into a Python object. |
+| json0, json1, ... | String (optional, autogrow) | JSON strings. A new slot appears as each one is connected (up to 10). |
+| lenient | Boolean | Recover JSON from LLM-style output (default on). See below. |
+| path | String | Optional path to a nested value, e.g. `workflow.nodes.0.type`, `items[2].name` or `prompt.3.inputs.seed`. Empty = whole result. |
 
 | Output | Type | Description |
 |--------|------|-------------|
-| data | Any | The parsed Python object. |
+| data | Any | The parsed (and combined) Python object. |
+| json_string | String | The result re-serialized as indented JSON. |
+
+**Never fails on bad input.** Unconnected inputs (e.g. the upstream node is bypassed) and empty strings are ignored. Invalid JSON, or a `path` that doesn't exist, logs a warning and shows a toast in the UI; the invalid input is skipped (a missing path outputs `{}`). If no input has data, the output is `{}`.
+
+**Combining inputs** (in slot order):
+- One value of any type passes through unchanged.
+- All objects: deep-merged. Nested objects are merged recursively, and for any other conflicting key the later slot wins (nested arrays are replaced, not concatenated).
+- All arrays: concatenated.
+- Anything else (e.g. an object and an array) is an error.
+
+**Lenient parsing** applies only when strict JSON parsing fails. It strips markdown code fences and surrounding text, removes trailing commas, and accepts Python-style literals (single quotes, `True`/`False`/`None`) via `ast.literal_eval`, which never executes code.
+
+> **Breaking change (v1.7.0+)** -- the single `json_string` input was replaced by autogrow `json0`, `json1`, ... inputs. Existing workflows lose that link on load; reconnect it to `json0`.
 
 ---
 
@@ -378,6 +393,7 @@ ComfyUI-Enhancement-Utils/
         ├── playSound.js               # PlaySound client handler
         ├── systemNotification.js      # Browser Notification handler
         ├── executionGate.js           # Toast when an Execution Gate blocks
+        ├── parseJson.js               # Toast for Parse JSON warnings
         ├── resourceMonitor.js         # Monitor UI (bars, settings, cost tracking)
         ├── resourceMonitorGraph.js    # Historical graph popup (Canvas 2D)
         ├── resourceMonitor.css        # Monitor + popup + context menu styling

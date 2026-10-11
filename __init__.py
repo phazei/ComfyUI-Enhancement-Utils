@@ -8,7 +8,7 @@ improving features from several community packages:
 - **Resource Monitor**: Real-time CPU/RAM/HDD/GPU stats in the menu bar.
 - **Node Profiler**: Per-node execution time badges with subgraph support.
 - **ImageLoadWithMetadata**: Image loader with subfolder support and metadata extraction.
-- **ParseJSON**: Convert a JSON string into a native Python object for any-type inputs.
+- **ParseJSON**: Parse and merge JSON strings into a native Python object for any-type inputs.
 - **PlaySound**: Play a sound when a workflow step (or the whole queue) completes.
 - **SystemNotification**: Browser notification on workflow completion.
 - **Node Navigation**: "Go to Node" menu, "Follow Execution" camera tracking.
