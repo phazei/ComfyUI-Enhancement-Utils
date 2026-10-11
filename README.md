@@ -81,6 +81,43 @@ Additionally draws a **green border** around the currently executing node.
 
 ---
 
+### Flow Visualizer
+
+**Right-click canvas > Flow visualization > Show**, or **right-click a node > Trace flow from here** (a quick look: the overlay turns itself off again when you deselect)
+
+An overlay that shows the order data flows through a workflow, so you don't have to trace noodles to understand a downloaded graph.
+
+- **Depth colours** -- every node gets a colour from how far it is from the start (longest path from a source), from red at the start to violet at the end. Links fade from their source node's colour to their target's, so a long red-to-violet link stands out as a long-range dependency (e.g. a VAE used at the very end).
+- **Pulse waves** -- a dashed pulse repeatedly travels from the start nodes through the graph, one depth step at a time. Nodes flash as the wave reaches them. Links spanning several steps carry the pulse proportionally slower.
+- **Hidden connections** -- Set/Get style nodes are followed through and drawn as dashed ghost links; reroutes, bypassed nodes and subgraphs are followed through as well. The overlay draws its own noodles, so it also works with links hidden. Lines are drawn on top of nodes by default so stacked layouts stay readable; **Flow visualization > Draw lines under nodes** puts them underneath (outlines and badges stay on top).
+- **What won't run is greyed out** -- muted nodes, branches that don't lead to an output node, and outputs that would fail validation because a required input is cut off (e.g. by a muted node).
+- **Switches** -- every visible connection is traced. Nodes with *lazy* inputs (switch-style nodes that only evaluate the branch they pick) get a diamond badge, with small diamonds on their lazy inputs. This is read from the node definitions, so it works with any node pack.
+- **Conditional nodes** -- nodes that may not run, because they only feed some branches of a switch, get a faded outline and a **?** badge. Nodes that feed every branch of a switch are known to run and stay normal. Select a conditional node to see which switch it depends on: the switch gets a pulsing ring, the path to it lights up, and **right-click > Go to gating switch** jumps to it (into subgraphs too).
+- **Follows the selection** -- with nothing selected the whole graph is shown; select node(s) and everything upstream and downstream stays lit while the rest is dimmed. Colours stay on the whole-workflow scale.
+- **While a workflow runs** -- the executing node gets a bright white pulsing ring (on the subgraph containing it when you're viewing the parent graph), and a "Running: ..." hint names it. With nothing selected, the overlay traces the running node as if you had selected it; selecting something yourself takes over.
+- Updates live as you edit the graph. Works in subgraphs and in both the classic and the Nodes 2.0 renderer.
+
+Also available as a command (bindable in the keybinding settings): **Toggle flow visualization**.
+
+**Settings** (ComfyUI Settings panel):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Show colour gradient | on | Gradient links and depth-coloured node outlines (pulses and greying show either way). |
+| Pulse colour | Shift with depth | Pulse takes the colour of the depth it reached, or each wave keeps one colour. |
+| Seconds per depth step | 0.6 | Pulse speed. |
+| Seconds between waves | 5 | How often a new wave starts. |
+| Line width (px) | 3 | Overlay line width, constant at any zoom. |
+| Opacity | 0.75 | Opacity of the steady gradient layer. |
+| Dim strength (selection) | 0.8 | How strongly elements outside the selection's trace are dimmed. |
+| Mark switches and conditional nodes | on | Switch diamonds and conditional **?** badges / faded outlines. |
+| Draw lines under nodes | off | Lines and pulses below the nodes instead of on top (also in the canvas menu). |
+| Source placement | At start | Where nodes without inputs (loaders) sit: depth 0, or just before their first use. |
+
+Limitations: the overlay shows the *static* structure. Which branch a switch picks at run time, execution blockers and nodes that expand at run time (loops) aren't predicted. Nodes that inject links at queue time by rewriting the prompt (rather than through the frontend's link-resolution hooks) aren't followed -- "Use Everywhere" is untested. Instances of the same subgraph share one colouring inside the subgraph.
+
+---
+
 ### Graph Arrange
 
 **Right-click canvas > Arrange**
@@ -397,6 +434,8 @@ ComfyUI-Enhancement-Utils/
         ├── nodeSearch.js              # "Go to node..." search panel
         ├── nodeSearchMatch.js         # Node search collection + matching (pure)
         ├── nodeSearch.css             # Node search panel styling
+        ├── flowGraph.js               # Flow Visualizer model (effective data flow, depths)
+        ├── flowVisualizer.js          # Flow Visualizer overlay, menus, settings
         ├── nodeProfiler.js            # Execution time badges (both renderers)
         ├── playSound.js               # PlaySound client handler
         ├── systemNotification.js      # Browser Notification handler
