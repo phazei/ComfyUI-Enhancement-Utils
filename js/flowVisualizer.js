@@ -1818,7 +1818,14 @@ function collectGhosts(graph, model) {
             const tb = getNodeBounds(to, boundsOut);
             endpoints.ex = tb[0];
             endpoints.ey = tb[1] + Math.min(titleH, tb[3]) * 0.5;
-            if (seg.toSlot >= 0 && to.outputs?.[seg.toSlot] && !to.flags?.collapsed) {
+            if (seg.toInput >= 0 && to.inputs?.[seg.toInput] && !to.flags?.collapsed) {
+                // Implicit link (e.g. Use Everywhere): ends on the target's input slot.
+                const p = to.getInputPos(seg.toInput);
+                if (p && Number.isFinite(p[0]) && Number.isFinite(p[1])) {
+                    endpoints.ex = p[0];
+                    endpoints.ey = p[1];
+                }
+            } else if (seg.toSlot >= 0 && to.outputs?.[seg.toSlot] && !to.flags?.collapsed) {
                 const p = to.getOutputPos(seg.toSlot);
                 if (p && Number.isFinite(p[1])) endpoints.ey = p[1];
             }

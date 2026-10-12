@@ -778,6 +778,81 @@ test("conditional node also reached by a strong path elsewhere is certain", () =
     assert.equal(m.nodes.get("2").conditional, true);
 });
 
+// ── Implicit links (Use Everywhere `graph.extra.ue_links`) ─────────────────
+
+/** Loader -> UE node -> (implicit) sampler -> output; the sampler's model input is unlinked. */
+function makeUeGraph() {
+    const g = new MockGraph("r");
+    const req = { required: { model: ["MODEL"] } };
+    const ld = g.add(mk(1, { outputs: ["MODEL"] }));
+    const ue = g.add(mk(2, { inputs: ["MODEL"] }));
+    const ks = g.add(mk(3, { inputs: [{ name: "model", type: "MODEL" }], outputs: ["LATENT"], nodeInput: req }));
+    const out = g.add(mk(4, { inputs: ["LATENT"], output: true }));
+    const feed = g.connect(ld, 0, ue, 0);
+    g.connect(ks, 0, out, 0);
+    g.extra = {
+        ue_links: [{ downstream: "3", downstream_slot: 0, upstream: "1", upstream_slot: 0, controller: "2", type: "MODEL" }],
+    };
+    return { g, ld, ue, ks, out, feed };
+}
+
+test("UE implicit link resolves the input; UE node becomes a hop with a ghost", () => {
+    const { g, ue, ks, feed } = makeUeGraph();
+    const m = buildFlowModel(g);
+    assert.equal(m.nodes.get("3").invalid, false, "sampler fed by UE is valid");
+    assert.equal(m.nodes.get("4").active, true);
+    assert.equal(m.nodes.get("1").active, true);
+    assert.equal(m.nodes.has("2"), false, "UE node is not a real node");
+    assert.equal(m.getNodeInfo(g, ue).kind, "virtual");
+    assert.equal(m.getNodeInfo(g, ue).active, true);
+    const e = m.edges.find((x) => x.to === "3");
+    assert.equal(e.from, "1");
+    assert.ok(m.getLinkInfo(g, feed.id).active, "loader -> UE link is on the path");
+    const ghosts = m.getVirtualSegments(g);
+    assert.equal(ghosts.length, 1);
+    assert.equal(ghosts[0].fromNode, ue);
+    assert.equal(ghosts[0].toNode, ks);
+    assert.equal(ghosts[0].toInput, 0);
+    assert.ok(m.traceSelection(g, [ue]).nodeKeys.has(nodeKey(g, ks)));
+});
+
+test("without ue_links the sampler is invalid (baseline)", () => {
+    const { g } = makeUeGraph();
+    g.extra = {};
+    const m = buildFlowModel(g);
+    assert.equal(m.nodes.get("3").invalid, true);
+    assert.equal(m.nodes.get("4").active, false);
+    assert.equal(m.nodes.has("2"), true, "plain node again");
+});
+
+test("muted UE node or a real link override the implicit link", () => {
+    const { g, ue, ld, ks } = makeUeGraph();
+    ue.mode = 2;
+    let m = buildFlowModel(g);
+    assert.equal(m.nodes.get("3").invalid, true, "muted broadcaster sends nothing");
+    ue.mode = 0;
+    const direct = g.connect(ld, 0, ks, 0);
+    m = buildFlowModel(g);
+    assert.equal(m.getVirtualSegments(g).length, 0, "real link wins");
+    assert.ok(m.getLinkInfo(g, direct.id).active);
+});
+
+test("implicitLinks option replaces the default readers; signature tracks ue_links", () => {
+    const { g } = makeUeGraph();
+    const m = buildFlowModel(g, { implicitLinks: [] });
+    assert.equal(m.nodes.get("3").invalid, true);
+    const s1 = computeFlowSignature(g);
+    g.extra.ue_links = [];
+    assert.notEqual(computeFlowSignature(g), s1);
+});
+
+test("malformed ue_links entries are ignored", () => {
+    const { g } = makeUeGraph();
+    g.extra.ue_links = [null, { downstream: "3" }, { downstream: "3", downstream_slot: "x", upstream: "1", upstream_slot: 0 }, 5];
+    const m = buildFlowModel(g);
+    assert.equal(m.nodes.get("3").invalid, true);
+});
+
 console.warn = origWarn;
 console.log(`\n${passed} passed, ${failed} failed`);
 if (warnings.length) console.log(`warnings logged (once each):\n  ${warnings.join("\n  ")}`);

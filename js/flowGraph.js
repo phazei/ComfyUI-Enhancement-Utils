@@ -376,6 +376,61 @@ function hookSignature(node) {
     return `${safeString(w0)}|${graph?._version}|${graph?.rootGraph?._version}`;
 }
 
+// ── Implicit Links ────────────────────────────────────────────────────────
+
+/**
+ * Implicit-link reader for Use Everywhere (cg-use-everywhere). UE's
+ * connections are not links: it adds them only while building the prompt.
+ * It does keep its current list of connections on each graph it analyses,
+ * `graph.extra.ue_links` (also saved with the workflow), as
+ * `{ downstream, downstream_slot, upstream, upstream_slot, controller }`.
+ * Reads nothing else from UE; returns [] when the field is absent.
+ *
+ * @param {Object} graph - Graph to read.
+ * @returns {Array<{target: *, targetSlot: number, origin: *, originSlot: number, via: *}>}
+ *   Implicit links (graph-local node ids; `via` = the broadcasting node).
+ */
+export function readUseEverywhereLinks(graph) {
+    const list = graph?.extra?.ue_links;
+    if (!Array.isArray(list)) return EMPTY;
+    const out = [];
+    for (const e of list) {
+        if (!e || e.downstream == null || e.upstream == null) continue;
+        const targetSlot = Number(e.downstream_slot);
+        const originSlot = Number(e.upstream_slot);
+        if (!Number.isInteger(targetSlot) || !Number.isInteger(originSlot)) continue;
+        out.push({ target: e.downstream, targetSlot, origin: e.upstream, originSlot, via: e.controller ?? null });
+    }
+    return out;
+}
+
+/**
+ * Default implicit-link readers used when `buildFlowModel` gets no
+ * `implicitLinks` option.
+ */
+const DEFAULT_IMPLICIT_READERS = Object.freeze([readUseEverywhereLinks]);
+
+/**
+ * Cheap signature of a graph's implicit links (for live rebuilds).
+ *
+ * @param {Object} graph - Graph to read.
+ * @param {Array<function(Object): Array<Object>>} readers - Implicit-link readers.
+ * @returns {string} Signature part ("" when there are none).
+ */
+function implicitSignature(graph, readers) {
+    let s = "";
+    for (const read of readers) {
+        let links = EMPTY;
+        try {
+            links = read(graph) || EMPTY;
+        } catch {
+            links = EMPTY;
+        }
+        for (const l of links) s += `${l.origin}.${l.originSlot}>${l.target}.${l.targetSlot}@${l.via ?? ""};`;
+    }
+    return s;
+}
+
 // ── Key Helpers ───────────────────────────────────────────────────────────
 
 /**
@@ -437,12 +492,15 @@ function virtualKey(graph, fromNode, toNode, toSlot) {
 /**
  * Cheap change signature for live rebuild detection. Covers each graph's
  * `_version`, node and link counts, every node's mode and the first widget
- * value of virtual nodes (Set/Get names), recursing into subgraphs.
+ * value of virtual nodes (Set/Get names) and the implicit links, recursing
+ * into subgraphs.
  *
  * @param {Object} rootGraph - The root LGraph.
+ * @param {Object} [options] - Same `implicitLinks` option as buildFlowModel.
  * @returns {string} Signature string (compare with ===).
  */
-export function computeFlowSignature(rootGraph) {
+export function computeFlowSignature(rootGraph, options = {}) {
+    const readers = Array.isArray(options?.implicitLinks) ? options.implicitLinks : DEFAULT_IMPLICIT_READERS;
     try {
         const parts = [];
         const seen = new Set();
@@ -472,7 +530,8 @@ export function computeFlowSignature(rootGraph) {
                     modes += `<${safeString(w0)}>`;
                 }
             }
-            parts.push(`${graphKeyOf(graph)}#${graph._version ?? ""}#${nodes.length}#${countLinks(graph)}#${modes}`);
+            parts.push(`${graphKeyOf(graph)}#${graph._version ?? ""}#${nodes.length}#${countLinks(graph)}#${modes}` +
+                `#${implicitSignature(graph, readers)}`);
             for (const child of children) visit(child);
         };
         visit(rootGraph);
@@ -515,6 +574,12 @@ function createEmptyModel() {
  * @param {Object} [options] - Build options.
  * @param {"start"|"late"} [options.sourcePlacement="start"] - Where nodes without
  *   resolved inputs sit: depth 0 ("start"), or just before their first consumer ("late").
+ * @param {Array<function(Object): Array<Object>>} [options.implicitLinks] - Readers of
+ *   connections that exist without a link (default: [readUseEverywhereLinks]). Each
+ *   `reader(graph)` returns `{target, targetSlot, origin, originSlot, via}` records with
+ *   graph-local node ids (`origin` may be the subgraph input id "-10"). An implicit link
+ *   only fills an input that has no real link; it is drawn as a ghost from `via` (or the
+ *   origin) to the target input, and `via` (when it is not the origin) becomes a hop.
  * @returns {Object} FlowModel (see SPEC: maxDepth, noOutputs, nodes, edges and getters).
  */
 export function buildFlowModel(rootGraph, options = {}) {
@@ -539,6 +604,44 @@ export function buildFlowModel(rootGraph, options = {}) {
 function buildModelInternal(rootGraph, options) {
     outputLinkIndex = new WeakMap();
     const sourcePlacement = options.sourcePlacement === "late" ? "late" : "start";
+    const implicitReaders = Array.isArray(options.implicitLinks) ? options.implicitLinks : DEFAULT_IMPLICIT_READERS;
+
+    /** graph -> { byTarget: Map<"id|slot", record>, vias: Set<string> } */
+    const implicitIndex = new Map();
+
+    /**
+     * Implicit links of a graph, indexed by target input (built once per build).
+     * Records whose broadcasting node is missing, muted or bypassed are
+     * dropped (that node no longer broadcasts).
+     * @param {Object} graph - Graph to index.
+     * @returns {{byTarget: Map<string, Object>, vias: Set<string>}} Index.
+     */
+    const getImplicitIndex = (graph) => {
+        let index = implicitIndex.get(graph);
+        if (index) return index;
+        index = { byTarget: new Map(), vias: new Set() };
+        implicitIndex.set(graph, index);
+        for (const read of implicitReaders) {
+            let links = EMPTY;
+            try {
+                links = read(graph) || EMPTY;
+            } catch (err) {
+                warnOnce("Flow: an implicit-link reader threw", err);
+            }
+            for (const l of links) {
+                if (!l || l.target == null || l.origin == null) continue;
+                const via = l.via == null ? null : String(l.via);
+                if (via !== null && via !== String(l.origin)) {
+                    const viaNode = getNodeById(graph, via);
+                    if (!viaNode || viaNode.mode === MODE_NEVER || viaNode.mode === MODE_BYPASS) continue;
+                    index.vias.add(via);
+                }
+                const key = `${l.target}|${l.targetSlot}`;
+                if (!index.byTarget.has(key)) index.byTarget.set(key, { ...l, via });
+            }
+        }
+        return index;
+    };
 
     /** execId -> FlowNode */
     const nodes = new Map();
@@ -594,6 +697,8 @@ function buildModelInternal(rootGraph, options) {
                     continue;
                 }
                 if (container || node.isVirtualNode) continue;
+                // A node that only broadcasts implicit links (UE node) is wiring, not work.
+                if (getImplicitIndex(ctx.graph).vias.has(String(node.id))) continue;
                 const execId = [...ctx.path, String(node.id)].join(":");
                 const flowNode = {
                     execId,
@@ -654,8 +759,56 @@ function buildModelInternal(rootGraph, options) {
         if (visited.has(guard)) return null;
         visited.add(guard);
         const link = getRealInputLink(ctx.graph, node, slot);
-        if (!link) return null;
+        if (!link) return resolveImplicit(ctx, node, slot, type ?? node.inputs?.[slot]?.type, segs, visited);
         return resolveFromLink(ctx, link, type ?? node.inputs?.[slot]?.type, segs, visited);
+    };
+
+    /**
+     * Resolve an unlinked input through an implicit link (see options.implicitLinks):
+     * ghost from the broadcasting node to the input, through the broadcaster as a
+     * hop and its real input link when it has one from the origin, then on to
+     * the origin output.
+     * @param {Object} ctx - Context of the node.
+     * @param {Object} node - The node whose input is resolved.
+     * @param {number} slot - Input slot index.
+     * @param {*} type - Target type.
+     * @param {Array<Object>} segs - Segment accumulator.
+     * @param {Set<string>} visited - Recursion guard.
+     * @returns {Object|null} Real source, or null.
+     */
+    const resolveImplicit = (ctx, node, slot, type, segs, visited) => {
+        const imp = getImplicitIndex(ctx.graph).byTarget.get(`${node.id}|${slot}`);
+        if (!imp) return null;
+        const originIsInput = String(imp.origin) === SUBGRAPH_INPUT_ID;
+        const origin = originIsInput ? null : getNodeById(ctx.graph, imp.origin);
+        if (!origin && !originIsInput) return null;
+        const via = imp.via !== null && imp.via !== String(imp.origin) ? getNodeById(ctx.graph, imp.via) : null;
+        const from = via ?? origin;
+        if (from) {
+            segs.push({
+                type: "virtual",
+                graph: ctx.graph,
+                key: virtualKey(ctx.graph, from, node, `i${slot}`),
+                fromNode: from,
+                toNode: node,
+                toSlot: -1,
+                toInput: slot,
+            });
+        }
+        if (via) {
+            segs.push({ type: "hop", graph: ctx.graph, node: via });
+            for (let i = 0; i < (via.inputs?.length ?? 0); i++) {
+                const l = getRealInputLink(ctx.graph, via, i);
+                if (l && String(l.origin_id) === String(imp.origin) && Number(l.origin_slot) === imp.originSlot) {
+                    return resolveFromLink(ctx, l, type, segs, visited);
+                }
+            }
+        }
+        if (originIsInput) {
+            if (!ctx.parent || !ctx.container) return null;
+            return resolveInput(ctx.parent, ctx.container, imp.originSlot, undefined, segs, visited);
+        }
+        return resolveOutput(ctx, origin, imp.originSlot, type, segs, visited);
     };
 
     /**
@@ -1060,6 +1213,7 @@ function buildModelInternal(rootGraph, options) {
                         fromNode: seg.fromNode,
                         toNode: seg.toNode,
                         toSlot: seg.toSlot,
+                        toInput: seg.toInput ?? -1,
                         t0,
                         t1,
                         active: e.active,
