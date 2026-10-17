@@ -1198,12 +1198,13 @@ function buildModelInternal(rootGraph, options) {
                 const key = linkKey(seg.graph, seg.linkId);
                 const info = linkInfo.get(key);
                 if (!info) {
-                    linkInfo.set(key, { t0, t1, active: e.active, lazy: e.lazy });
+                    linkInfo.set(key, { t0, t1, active: e.active, lazy: e.lazy, toIds: [e.to] });
                 } else {
                     info.t0 = Math.min(info.t0, t0);
                     info.t1 = Math.max(info.t0, Math.min(info.t1, t1));
                     info.active = info.active || e.active;
                     info.lazy = info.lazy && e.lazy;
+                    if (!info.toIds.includes(e.to)) info.toIds.push(e.to);
                 }
             } else if (seg.type === "virtual") {
                 let info = virtualInfo.get(seg.key);
@@ -1218,6 +1219,7 @@ function buildModelInternal(rootGraph, options) {
                         t1,
                         active: e.active,
                         lazy: e.lazy,
+                        toIds: [e.to],
                     };
                     virtualInfo.set(seg.key, info);
                     const gk = graphKeyOf(seg.graph);
@@ -1228,6 +1230,7 @@ function buildModelInternal(rootGraph, options) {
                     info.t1 = Math.max(info.t0, Math.min(info.t1, t1));
                     info.active = info.active || e.active;
                     info.lazy = info.lazy && e.lazy;
+                    if (!info.toIds.includes(e.to)) info.toIds.push(e.to);
                 }
             }
         }
@@ -1418,7 +1421,8 @@ function buildModelInternal(rootGraph, options) {
      * Info for a visual link.
      * @param {Object} graph - Graph the link lives in.
      * @param {*} linkId - Graph-local link id.
-     * @returns {Object|null} { t0, t1, active, lazy }, or null when not on a resolved data path.
+     * @returns {Object|null} { t0, t1, active, lazy, toIds }, or null when not on a resolved data path
+     *   (`toIds`: exec ids of the real nodes the link feeds).
      */
     const getLinkInfo = (graph, linkId) => {
         try {

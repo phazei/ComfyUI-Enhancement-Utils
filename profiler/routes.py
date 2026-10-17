@@ -4,18 +4,21 @@ Profiler HTTP API routes.
 Provides endpoints for the frontend to:
 - Retrieve profiling results on page load or refresh, so that timing badges
   can be restored without re-running the workflow.
+- Retrieve the per-node outcome of the last run (ran / cached / blocked /
+  error) for the Flow Visualizer.
 - Update profiler settings (console summary on/off).
 
 Registered on PromptServer via aiohttp route decorators.
 """
 
+import json
 import logging
 
 from aiohttp import web
 import server
 
 from . import hooks
-from .hooks import get_all_times, get_elapsed
+from .hooks import get_all_times, get_elapsed, get_run
 
 logger = logging.getLogger("enhutils.profiler.routes")
 
@@ -33,6 +36,22 @@ async def get_profiler_results(_request: web.Request) -> web.Response:
     data = get_all_times()
     data["total_elapsed"] = get_elapsed()
     return web.json_response(data)
+
+
+@server.PromptServer.instance.routes.get("/enhutils/profiler/run")
+async def get_profiler_run(_request: web.Request) -> web.Response:
+    """Return what happened to every node of the current / last run (used
+    by the Flow Visualizer's "Show last run" / "Replay last run").
+
+    Response JSON: see ``hooks.get_run()``. Prompt input values are passed
+    through as queued; anything not JSON-serialisable is stringified.
+    """
+    try:
+        data = get_run()
+    except Exception as e:
+        logger.warning(f"Failed to read the last run: {e}")
+        return web.json_response({"error": "unavailable"}, status=500)
+    return web.json_response(data, dumps=lambda obj: json.dumps(obj, default=str))
 
 
 @server.PromptServer.instance.routes.patch("/enhutils/profiler/settings")

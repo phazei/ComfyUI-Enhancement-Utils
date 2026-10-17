@@ -90,14 +90,19 @@ An overlay that shows the order data flows through a workflow, so you don't have
 - **Depth colours** -- every node gets a colour from how far it is from the start (longest path from a source), from red at the start to violet at the end. Links fade from their source node's colour to their target's, so a long red-to-violet link stands out as a long-range dependency (e.g. a VAE used at the very end).
 - **Pulse waves** -- a dashed pulse repeatedly travels from the start nodes through the graph, one depth step at a time. Nodes flash as the wave reaches them. Links spanning several steps carry the pulse proportionally slower.
 - **Hidden connections** -- Set/Get style nodes and [Use Everywhere](https://github.com/chrisgoringe/cg-use-everywhere) broadcasts are followed through and drawn as dashed ghost links; reroutes, bypassed nodes and subgraphs are followed through as well. The overlay draws its own noodles, so it also works with links hidden. Lines are drawn on top of nodes by default so stacked layouts stay readable; **Flow visualization > Draw lines under nodes** puts them underneath (outlines and badges stay on top).
-- **What won't run is greyed out** -- muted nodes, branches that don't lead to an output node, and outputs that would fail validation because a required input is cut off (e.g. by a muted node).
+- **What won't run is greyed out** -- muted nodes, branches that don't lead to an output node, and outputs that would fail validation because a required input is cut off (e.g. by a muted node). Greyed nodes get a dark wash and only a faint border, like the dimming outside a selection.
+- **Tooltips** -- hover any badge (switch diamond, lazy-input diamond, **?**, or a last-run badge) for what it means.
 - **Switches** -- every visible connection is traced. Nodes with *lazy* inputs (switch-style nodes that only evaluate the branch they pick) get a diamond badge, with small diamonds on their lazy inputs. This is read from the node definitions, so it works with any node pack.
 - **Conditional nodes** -- nodes that may not run, because they only feed some branches of a switch, get a faded outline and a **?** badge. Nodes that feed every branch of a switch are known to run and stay normal. Select a conditional node to see which switch it depends on: the switch gets a pulsing ring, the path to it lights up, and **right-click > Go to gating switch** jumps to it (into subgraphs too).
 - **Follows the selection** -- with nothing selected the whole graph is shown; select node(s) and everything upstream and downstream stays lit while the rest is dimmed. Colours stay on the whole-workflow scale.
-- **While a workflow runs** -- the executing node gets a bright white pulsing ring (on the subgraph containing it when you're viewing the parent graph), and a "Running: ..." hint names it. With nothing selected, the overlay traces the running node as if you had selected it; selecting something yourself takes over.
+- **While a workflow runs** -- the executing node gets a bright white pulsing ring (on the subgraph containing it when you're viewing the parent graph), and a "Running: ..." hint names it. Nodes that finish quickly leave a short fading ring, so even millisecond-fast nodes visibly blink. With nothing selected, the overlay traces the running node as if you had selected it; selecting something yourself takes over.
+- **Last run** -- **Flow visualization > Show last run** shows what actually happened in the most recent run instead of the prediction: nodes that ran keep their colours; nodes that were skipped (an untaken switch branch, an output that wasn't needed) or blocked, and the links that only fed them, are greyed out; cached nodes get a **↺** badge, blocked ones **⊘**, failed or interrupted ones a red / amber outline and **!**. Nodes you've edited since the run (widget values, links, new nodes) get a **Δ** badge, since the record no longer applies to them. A hint sums it up ("finished in 12.3 s -- 14 ran, 6 cached, 3 skipped"). It updates live while a workflow runs. A run from a different workflow isn't applied. Hover a badge for details: the error message of a failed node, or every change ("steps 20 → 33"; for long text or JSON, just the parts that differ, e.g. `…a «cat» → «dog» sitting…` or `list[1].y: 4 → 5`). A subgraph's badge names the changed nodes inside it.
+- **Replay last run** -- animates the last run in its real execution order. All cached nodes flash together first (their whole upstream is unchanged, so their outputs exist before anything runs). Then for each node, pulses travel in along the links that fed it and a ring holds on it for at least **Replay minimum per node** (500 ms), plus extra time that grows with the logarithm of how long it really took -- so fast nodes stay visible and a long sampler doesn't take over. Only the extra time is compressed to fit **Replay length**, so big workflows can take longer. Select a node during a replay to dim everything outside its path. ComfyUI doesn't run one path to the end before starting another: it prefers nodes that complete an output, otherwise runs whatever is ready, so independent branches interleave.
 - Updates live as you edit the graph. Works in subgraphs and in both the classic and the Nodes 2.0 renderer.
 
-Also available as a command (bindable in the keybinding settings): **Toggle flow visualization**.
+Also available as commands (bindable in the keybinding settings): **Toggle flow visualization**, **Toggle flow visualization of the last run**, **Replay last run (flow visualization)**.
+
+The last-run record comes from the [Node Profiler](#node-profiler)'s backend hooks, which run whether or not the profiler badges are enabled. It is kept in memory: it survives a browser refresh but not a ComfyUI restart.
 
 **Settings** (ComfyUI Settings panel):
 
@@ -112,9 +117,11 @@ Also available as a command (bindable in the keybinding settings): **Toggle flow
 | Dim strength (selection) | 0.8 | How strongly elements outside the selection's trace are dimmed. |
 | Mark switches and conditional nodes | on | Switch diamonds and conditional **?** badges / faded outlines. |
 | Draw lines under nodes | off | Lines and pulses below the nodes instead of on top (also in the canvas menu). |
+| Replay length (s) | 12 | Target length of a replay; only the extra time of slow nodes is compressed to fit. |
+| Replay minimum per node (ms) | 500 | Shortest time each node is shown running in a replay (and the length of the cached beat). |
 | Source placement | At start | Where nodes without inputs (loaders) sit: depth 0, or just before their first use. |
 
-Limitations: the overlay shows the *static* structure. Which branch a switch picks at run time, execution blockers and nodes that expand at run time (loops) aren't predicted. Nodes that inject links at queue time by rewriting the prompt (rather than through the frontend's link-resolution hooks) aren't followed -- "Use Everywhere" is untested. Instances of the same subgraph share one colouring inside the subgraph.
+Limitations: the live overlay shows the *static* structure. Which branch a switch picks at run time, execution blockers and nodes that expand at run time (loops) aren't predicted -- use **Show last run** to see what actually happened. Nodes that inject links at queue time by rewriting the prompt (rather than through the frontend's link-resolution hooks or a record like Use Everywhere's) aren't followed. Instances of the same subgraph share one colouring inside the subgraph. "Changed since the run" ignores seed-style widgets that change themselves after queueing, and prompt text using dynamic-prompt syntax (`{a|b}`, comments). Runs queued through the API without a client id send no progress events, so they aren't recorded.
 
 ---
 
@@ -419,8 +426,8 @@ ComfyUI-Enhancement-Utils/
 │
 ├── profiler/
 │   ├── __init__.py                # Module setup, triggers hooks on import
-│   ├── hooks.py                   # Monkey-patches for execution timing
-│   └── routes.py                  # HTTP API endpoint for profiler results
+│   ├── hooks.py                   # Monkey-patches for execution timing and last-run states
+│   └── routes.py                  # HTTP API endpoints for profiler results / last run
 │
 ├── src/                           # Build source (not served by ComfyUI)
 │   ├── nodeProfilerBadge.ts       # Vue-aware profiler badge (Nodes 2.0 compatible)
@@ -435,6 +442,8 @@ ComfyUI-Enhancement-Utils/
         ├── nodeSearchMatch.js         # Node search collection + matching (pure)
         ├── nodeSearch.css             # Node search panel styling
         ├── flowGraph.js               # Flow Visualizer model (effective data flow, depths)
+        ├── flowRun.js                 # Flow Visualizer last-run view and replay timeline
+        ├── canvasMenu.js              # Shared canvas menu block (orders our entries together)
         ├── flowVisualizer.js          # Flow Visualizer overlay, menus, settings
         ├── nodeProfiler.js            # Execution time badges (both renderers)
         ├── playSound.js               # PlaySound client handler

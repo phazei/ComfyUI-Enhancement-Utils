@@ -20,6 +20,7 @@
  */
 
 import { app } from "../../scripts/app.js";
+import { registerCanvasMenuSection } from "./canvasMenu.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings
@@ -1132,41 +1133,34 @@ app.registerExtension({
 
         // ── Context Menu ───────────────────────────────────────────
 
-        const origGetCanvasMenuOptions = LGraphCanvas.prototype.getCanvasMenuOptions;
-
-        LGraphCanvas.prototype.getCanvasMenuOptions = function () {
-            const options = origGetCanvasMenuOptions.apply(this, arguments);
-
-            options.push({
-                content: "Arrange",
-                has_submenu: true,
-                submenu: {
-                    options: [
-                        {
-                            content: "Center Graph (shift to 0,0)",
-                            callback: () => centerGraph(app.canvas.graph),
-                        },
-                        null, // separator
-                        {
-                            content: "Quick (column aligned)",
-                            callback: () => withPreservedCenter(app.canvas.graph,
-                                () => arrangeFloatRightGroups(app.canvas.graph)),
-                        },
-                        {
-                            content: "Smart (dagre)",
-                            callback: () => withPreservedCenter(app.canvas.graph,
-                                () => arrangeDagreGroups(app.canvas.graph)),
-                        },
-                        {
-                            content: "Advanced (ELK)",
-                            callback: () => withPreservedCenter(app.canvas.graph,
-                                () => arrangeELK(app.canvas.graph)),
-                        },
-                    ],
-                },
-            });
-
-            return options;
-        };
+        // Shared Enhancement Utils block (see canvasMenu.js).
+        registerCanvasMenuSection(10, () => [{
+            content: "Arrange",
+            has_submenu: true,
+            submenu: {
+                options: [
+                    {
+                        content: "Center Graph (shift to 0,0)",
+                        callback: () => centerGraph(app.canvas.graph),
+                    },
+                    null, // separator
+                    {
+                        content: "Quick (column aligned)",
+                        callback: () => withPreservedCenter(app.canvas.graph,
+                            () => arrangeFloatRightGroups(app.canvas.graph)),
+                    },
+                    {
+                        content: "Smart (dagre)",
+                        callback: () => withPreservedCenter(app.canvas.graph,
+                            () => arrangeDagreGroups(app.canvas.graph)),
+                    },
+                    {
+                        content: "Advanced (ELK)",
+                        callback: () => withPreservedCenter(app.canvas.graph,
+                            () => arrangeELK(app.canvas.graph)),
+                    },
+                ],
+            },
+        }]);
     },
 });

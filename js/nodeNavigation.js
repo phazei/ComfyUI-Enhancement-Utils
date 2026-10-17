@@ -17,6 +17,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { findNodeByExecutionId, focusNode } from "./utils.js";
 import { openNodeSearch } from "./nodeSearch.js";
+import { registerCanvasMenuSection } from "./canvasMenu.js";
 
 app.registerExtension({
     name: "phazei.NodeNavigation",
@@ -100,39 +101,29 @@ app.registerExtension({
             ctx.restore();
         };
 
-        // ── Canvas Context Menu Additions ──────────────────────────────
+        // ── Canvas Context Menu Additions (shared block, see canvasMenu.js) ──
 
-        const origGetCanvasMenuOptions = LGraphCanvas.prototype.getCanvasMenuOptions;
-        LGraphCanvas.prototype.getCanvasMenuOptions = function () {
-            const options = origGetCanvasMenuOptions.apply(this, arguments);
-
-            // Separator before our items.
-            options.push(null);
-
-            // Toggle follow execution.
-            options.push({
-                content: followExecution ? "Stop following execution" : "Follow execution",
-                callback: () => {
-                    followExecution = !followExecution;
-                    if (followExecution) followToExecutingNode(app.runningNodeId);
+        registerCanvasMenuSection(20, () => {
+            const items = [
+                {
+                    content: followExecution ? "Stop following execution" : "Follow execution",
+                    callback: () => {
+                        followExecution = !followExecution;
+                        if (followExecution) followToExecutingNode(app.runningNodeId);
+                    },
                 },
-            });
-
+            ];
             // Jump to currently executing node (only shown during execution).
             if (app.runningNodeId) {
-                options.push({
+                items.push({
                     content: "Show executing node",
                     callback: () => focusNode(findNodeByExecutionId(app.runningNodeId)),
                 });
             }
+            return items;
+        });
 
-            // Node search panel (by number, subgraph path, title or type).
-            options.push({
-                content: "Go to node...",
-                callback: () => openNodeSearch(),
-            });
-
-            return options;
-        };
+        // Node search panel (by number, subgraph path, title or type); after Flow visualization.
+        registerCanvasMenuSection(40, () => [{ content: "Go to node...", callback: () => openNodeSearch() }]);
     },
 });

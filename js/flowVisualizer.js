@@ -41,14 +41,26 @@
  * linear and straight modes, reroute control points), so the overlay sits on
  * the real noodles, and still draws when links are hidden.
  *
- * Future runtime seam: `registerFlowStateProvider(fn)` lets a later feature
- * (e.g. "replay last run") override the static node styling per execution id.
+ * Last run: "Show last run" restyles nodes by what happened in the last run
+ * (record from the profiler, `GET /enhutils/profiler/run` plus live
+ * `enhutils.profiler.node_state` events; logic in `flowRun.js`): ran nodes
+ * keep their colours, skipped / blocked / not-reached ones are greyed (and
+ * the links that fed only them), cached / blocked / failed / changed-since
+ * nodes get a badge, and the ambient waves stop. "Replay last run" animates
+ * the run in its real order: pulses travel into each node, then a running
+ * ring holds on it for a time scaled by its real duration. Both go through
+ * `registerFlowStateProvider(fn)`, which other features can use too.
  */
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { buildFlowModel, computeFlowSignature, nodeKey, linkKey } from "./flowGraph.js";
 import { findNodeByExecutionId, focusNode } from "./utils.js";
+import { registerCanvasMenuSection } from "./canvasMenu.js";
+import {
+    normalizeRun, createLiveRun, applyNodeState, computeRunView, buildReplayTimeline, replayEventAt,
+    replayStatusAt, aggregateStatus,
+} from "./flowRun.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants
@@ -67,6 +79,11 @@ const SETTING_DIM_STRENGTH = "EnhUtils.Flow.DimStrength";
 const SETTING_MARK_LAZY = "EnhUtils.Flow.MarkLazy";
 const SETTING_SOURCE_PLACEMENT = "EnhUtils.Flow.SourcePlacement";
 const SETTING_LINES_UNDER = "EnhUtils.Flow.LinesUnderNodes";
+const SETTING_REPLAY_DURATION = "EnhUtils.Flow.ReplayDuration";
+const SETTING_REPLAY_MIN_NODE = "EnhUtils.Flow.ReplayMinNodeMs";
+
+/** Profiler endpoint with the per-node record of the last run. */
+const RUN_ENDPOINT = "/enhutils/profiler/run";
 
 const PULSE_COLOR_DEPTH = "Shift with depth";
 const PULSE_COLOR_WAVE = "One colour per wave";
@@ -122,6 +139,8 @@ const BADGE_MAX_SCALE = 4;
  * fast nodes from flickering the dimming.
  */
 const RUN_TRACE_SETTLE_MS = 150;
+/** How long the running ring fades out after a node finishes (ms). */
+const RUN_AFTERGLOW_MS = 500;
 /** Flash intensity held while a wave is inside a container's depth span (peak is 1). */
 const FLASH_SUSTAIN = 0.35;
 /** Max gates named in the gate hint before "+N more". */
@@ -129,10 +148,49 @@ const GATE_HINT_MAX = 3;
 /** Max characters of one gate title in the hint. */
 const GATE_TITLE_MAX = 40;
 
+/** Replay: how long the finished picture holds before the replay ends (s). */
+const REPLAY_HOLD_S = 1.5;
+/** How long a "nothing to replay" style notice stays up (ms). */
+const NOTICE_MS = 3000;
+/** How often the run view re-checks for nodes changed since the run (ms). */
+const RUN_VIEW_REFRESH_MS = 500;
+
 const GREY = "rgb(128,128,128)";
+/** Outline opacity of greyed (won't run / didn't run) nodes -- about what selection dimming leaves. */
+const GREY_OUTLINE_ALPHA = 0.15;
 const WASH_FILL = "rgba(20,20,20,0.55)";
 const BADGE_BG = "rgba(0,0,0,0.8)";
 const GATE_RING = "#fff";
+
+/**
+ * Last-run status badges (top-left corner of the node): glyph + colour.
+ * Ran and skipped nodes get none (normal colours / grey wash say it).
+ */
+const RUN_BADGES = Object.freeze({
+    cached: { glyph: "\u21BA", color: "#7ec8ff" },
+    blocked: { glyph: "\u2298", color: "#b0b0b0" },
+    error: { glyph: "!", color: "#ff5252" },
+    interrupted: { glyph: "!", color: "#ffb020" },
+    changed: { glyph: "\u0394", color: "#e8e8e8" },
+});
+/** Outline colour override for failed nodes. */
+const RUN_OUTLINE_COLORS = Object.freeze({ error: RUN_BADGES.error.color, interrupted: RUN_BADGES.interrupted.color });
+/** Run statuses that grey a node out (it did not run). */
+const RUN_GREY = new Set(["skipped", "blocked", "not_reached"]);
+/** Run statuses that settle a node's fate (its conditional "?" styling no longer applies). */
+const RUN_SETTLED = new Set(["ran", "cached", "blocked", "error", "interrupted", "skipped", "not_reached"]);
+/** Small integer per status, for the static-layer hash. */
+const STATUS_CODES = new Map([...RUN_SETTLED, "running", "pending", "changed"].map((s, i) => [s, i + 1]));
+
+/**
+ * Hash code of a runtime status.
+ *
+ * @param {string|null} status - Status.
+ * @returns {number} 0 for none, else a small positive integer.
+ */
+function statusCode(status) {
+    return status ? STATUS_CODES.get(status) ?? 31 : 0;
+}
 
 /** Precomputed `hsl()` strings for integer hues 0..360. */
 const HUE_COLORS = [];
@@ -154,6 +212,8 @@ const config = {
     markLazy: true,
     sourcePlacement: "start",
     linesUnder: false,
+    replayDuration: 12,
+    replayMinNodeMs: 500,
 };
 
 /** Mutable renderer state. */
@@ -223,6 +283,39 @@ const state = {
     lines: { canvas: null, ctx: null },
     /** LiteGraph canvases whose `onRender` is already hooked. */
     hookedCanvases: new WeakSet(),
+};
+
+/**
+ * Last run ("Show last run" / "Replay last run"). The record is kept current
+ * from the profiler's WebSocket events whether or not it is shown.
+ */
+const lastRun = {
+    /** Run view on: nodes show what happened in the last run. */
+    show: false,
+    /** Normalised run (flowRun.js), or null. */
+    run: null,
+    /** Bumped on every change of `run`. */
+    version: 0,
+    /** A fetch is in flight. */
+    fetching: false,
+    /** The endpoint failed (old backend?); shown as a hint. */
+    unavailable: false,
+    /** Prompt id a mid-run fetch (for the queued prompt) was already made for. */
+    promptFetchedFor: null,
+    /** Cached computeRunView result and what it was computed for. */
+    view: null,
+    viewKey: "",
+    /** performance.now() of the last computeRunView. */
+    viewTime: 0,
+    /**
+     * Replay in progress: { pending, timeline, start, eventIndex } or null.
+     * `pending` = waiting for a fetch / the model to build the timeline.
+     */
+    replay: null,
+    /** Replay time (s) of the current frame. */
+    replayTime: 0,
+    /** Transient notice { text, until } or null. */
+    notice: null,
 };
 
 /** Cached sampled link / ghost geometry: key -> geometry entry. */
@@ -335,24 +428,24 @@ function addRoundRect(ctx, x, y, w, h, r) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Runtime State Providers (future seam)
+// Runtime State Providers
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Statuses that grey a node out (it did not / will not run). */
-const STATUS_GREY = new Set(["skipped", "blocked"]);
-
 /**
- * Register a runtime flow-state provider. Providers let a later feature
- * (e.g. replaying the last run from `executing` / `execution_cached` /
- * `executed` WebSocket events) override the static styling of real nodes.
+ * Register a runtime flow-state provider. Providers override the static
+ * styling of real nodes (and, aggregated, of subgraph containers); the
+ * built-in one is the last-run view below.
  *
- * `fn(execId)` returns `null` (no opinion) or
- * `{ status: "pending"|"running"|"done"|"cached"|"blocked"|"skipped", order?: number }`.
- * "skipped" / "blocked" grey the node out, "running" makes it flash
- * continuously; other statuses keep the static styling. With no providers
- * registered the overlay shows the static model only.
+ * `fn(execId)` returns `null` (no opinion) or `{ status }` with status one of
+ * "ran" | "cached" | "blocked" | "error" | "interrupted" | "skipped" |
+ * "not_reached" | "pending" | "running" | "changed":
+ *   - "skipped" / "blocked" / "not_reached" grey the node out
+ *   - "running" flashes it and draws the running ring
+ *   - "cached" / "blocked" / "error" / "interrupted" / "changed" add a badge
+ *   - "pending" is only dimmed during a replay
+ * With no provider answering, the overlay shows the static model only.
  *
- * @param {function(string): (null|{status: string, order?: number})} fn - Provider.
+ * @param {function(string): (null|{status: string})} fn - Provider.
  * @returns {function(): void} Unregister function.
  */
 export function registerFlowStateProvider(fn) {
@@ -364,16 +457,20 @@ export function registerFlowStateProvider(fn) {
     };
 }
 
+/** Scratch list of statuses for `getRuntimeStatus`. */
+const statusScratch = [];
+
 /**
- * Combined runtime status of a node from all providers. "running" wins over
- * everything; otherwise the first non-null status is used.
+ * Combined runtime status of a node (or a container: all its exec ids) from
+ * all providers: the strongest one (running > error > interrupted > changed >
+ * ran > cached > blocked > pending > not_reached > skipped).
  *
  * @param {Array<string>} execIds - Exec ids of the node.
  * @returns {string|null} Status, or null when no provider has an opinion.
  */
 function getRuntimeStatus(execIds) {
     if (flowStateProviders.length === 0 || !execIds?.length) return null;
-    let found = null;
+    statusScratch.length = 0;
     for (const fn of flowStateProviders) {
         for (const id of execIds) {
             let r = null;
@@ -385,10 +482,324 @@ function getRuntimeStatus(execIds) {
             const status = r?.status;
             if (!status) continue;
             if (status === "running") return status;
-            if (!found) found = status;
+            statusScratch.push(status);
         }
     }
-    return found;
+    return statusScratch.length ? aggregateStatus(statusScratch) : null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Last Run
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Replace the last-run record and invalidate what was derived from it.
+ *
+ * @param {Object|null} run - Normalised run.
+ * @returns {void}
+ */
+function setLastRun(run) {
+    lastRun.run = run;
+    lastRun.version++;
+}
+
+/**
+ * Fetch the profiler's record of the current / last run. Never throws.
+ *
+ * @returns {Promise<void>} Resolves when done (also on failure).
+ */
+async function fetchLastRun() {
+    if (lastRun.fetching) return;
+    lastRun.fetching = true;
+    try {
+        const res = await api.fetchApi(RUN_ENDPOINT);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const run = normalizeRun(await res.json());
+        lastRun.unavailable = false;
+        // A response that predates the live run we are already tracking must not replace it.
+        const live = lastRun.run;
+        if (live?.status === "running" && run?.promptId !== live.promptId && run?.status !== "running") return;
+        setLastRun(run);
+    } catch (err) {
+        lastRun.unavailable = true;
+        warnOnce("could not load the last run from the profiler", err);
+    } finally {
+        lastRun.fetching = false;
+    }
+}
+
+/**
+ * A prompt started executing: start a fresh live record.
+ *
+ * @param {Object} detail - `execution_start` detail { prompt_id }.
+ * @returns {void}
+ */
+function onRunStart(detail) {
+    setLastRun(createLiveRun(detail?.prompt_id));
+}
+
+/**
+ * Live per-node state from the profiler. The queued prompt (needed for
+ * skipped / changed) is not in these events, so it is fetched once per run.
+ *
+ * @param {Object} detail - `enhutils.profiler.node_state` detail.
+ * @returns {void}
+ */
+function onNodeState(detail) {
+    if (!detail || typeof detail !== "object") return;
+    const promptId = detail.prompt_id == null ? "" : String(detail.prompt_id);
+    if (!lastRun.run || (promptId && lastRun.run.promptId !== promptId)) lastRun.run = createLiveRun(promptId);
+    if (applyNodeState(lastRun.run, detail)) lastRun.version++;
+    if (lastRun.show && !lastRun.run.prompt && lastRun.promptFetchedFor !== promptId) {
+        lastRun.promptFetchedFor = promptId;
+        fetchLastRun();
+    }
+}
+
+/**
+ * The run finished: fetch the final record when it is on screen (otherwise
+ * it is fetched when the view is shown).
+ *
+ * @returns {void}
+ */
+function onRunEnd() {
+    if (lastRun.show) fetchLastRun();
+}
+
+/**
+ * Run-view statuses for the current model (recomputed when the run, model or
+ * workflow changed).
+ *
+ * @param {Object} model - Flow model.
+ * @returns {Object|null} computeRunView result, or null when there is no run.
+ */
+function getRunView(model) {
+    if (!lastRun.run || !model) {
+        lastRun.view = null;
+        lastRun.viewKey = "";
+        return null;
+    }
+    const workflowId = app.graph?.id ?? "";
+    const key = `${lastRun.version}|${state.modelVersion}|${workflowId}`;
+    // Widget edits don't change the model, so "changed since the run" is
+    // also re-checked on a timer (cheap: one pass over the real nodes).
+    const now = performance.now();
+    if (key !== lastRun.viewKey || now - lastRun.viewTime >= RUN_VIEW_REFRESH_MS) {
+        lastRun.viewKey = key;
+        lastRun.viewTime = now;
+        lastRun.view = computeRunView(lastRun.run, model, { workflowId, rootGraph: app.graph });
+    }
+    return lastRun.view;
+}
+
+/**
+ * Whether the run view is styling the graph this frame.
+ *
+ * @returns {boolean} True when shown with a usable run.
+ */
+function runViewActive() {
+    return lastRun.show && !!lastRun.view && !lastRun.view.foreign;
+}
+
+/**
+ * Built-in flow-state provider: the last run (final statuses, or the replay's
+ * statuses at the current replay time).
+ *
+ * @param {string} execId - Exec id.
+ * @returns {null|{status: string}} Status.
+ */
+function lastRunProvider(execId) {
+    if (!runViewActive()) return null;
+    const statuses = lastRun.view.statuses;
+    const replay = lastRun.replay;
+    if (replay?.timeline) {
+        const status = replayStatusAt(replay.timeline, statuses, execId, lastRun.replayTime);
+        return status ? { status } : null;
+    }
+    const status = statuses.get(execId);
+    // Live run: the running ring follows the `executing` event instead (a
+    // lazy switch stays "running" in the record while its branch executes).
+    if (!status || status === "running") return null;
+    return { status };
+}
+registerFlowStateProvider(lastRunProvider);
+
+/**
+ * Final (not replay-time) run status of an exec id, for link greying.
+ *
+ * @param {string} execId - Exec id.
+ * @returns {string|null} Status.
+ */
+function finalRunStatus(execId) {
+    return runViewActive() ? lastRun.view.statuses.get(execId) ?? null : null;
+}
+
+/**
+ * Whether a link / ghost carried nothing in the last run: every node it
+ * feeds was skipped, blocked or not reached.
+ *
+ * @param {Object|null} info - Link / virtual info (with `toIds`).
+ * @returns {boolean} True to draw it grey.
+ */
+function linkIdleInRun(info) {
+    const ids = info?.toIds;
+    if (!ids?.length || !runViewActive()) return false;
+    for (const id of ids) {
+        const s = finalRunStatus(id);
+        if (!s || !RUN_GREY.has(s)) return false;
+    }
+    return true;
+}
+
+/**
+ * Show / hide the last run. Showing turns the overlay on.
+ *
+ * @param {boolean} on - Show.
+ * @returns {void}
+ */
+function showLastRun(on) {
+    lastRun.show = !!on;
+    if (!on) {
+        lastRun.replay = null;
+        return;
+    }
+    if (state.mode === "off") setMode("on");
+    lastRun.show = true;
+    fetchLastRun();
+}
+
+/**
+ * Replay the last run: show it, fetch the latest record, then animate it in
+ * real execution order (the timeline is built in the next frame that has
+ * both the record and the model).
+ *
+ * @returns {void}
+ */
+function replayLastRun() {
+    showLastRun(true);
+    lastRun.replay = { pending: true, timeline: null, start: 0, eventIndex: -1 };
+    lastRun.replayTime = 0;
+}
+
+/**
+ * Advance the replay clock; builds the timeline once possible and ends the
+ * replay after its hold time.
+ *
+ * @param {number} now - Frame timestamp (ms).
+ * @param {Object} model - Flow model.
+ * @returns {void}
+ */
+function updateReplay(now, model) {
+    const replay = lastRun.replay;
+    if (!replay) return;
+    if (replay.pending) {
+        if (lastRun.fetching) return;
+        const view = getRunView(model);
+        if (!lastRun.run || !view || view.foreign) {
+            lastRun.replay = null;
+            setNotice(!lastRun.run ? "Flow: no run to replay yet" : "Flow: the last run was a different workflow");
+            return;
+        }
+        const timeline = buildReplayTimeline(lastRun.run, model, {
+            maxDuration: config.replayDuration,
+            minNodeMs: config.replayMinNodeMs,
+        });
+        if (!timeline.events.length) {
+            lastRun.replay = null;
+            setNotice("Flow: nothing to replay (no node of this workflow ran)");
+            return;
+        }
+        replay.pending = false;
+        replay.timeline = timeline;
+        replay.start = now;
+    }
+    lastRun.replayTime = (now - replay.start) / 1000;
+    replay.eventIndex = replayEventAt(replay.timeline, lastRun.replayTime);
+    if (lastRun.replayTime > replay.timeline.duration + REPLAY_HOLD_S) lastRun.replay = null;
+}
+
+/**
+ * Show a transient hint.
+ *
+ * @param {string} text - Hint text.
+ * @returns {void}
+ */
+function setNotice(text) {
+    lastRun.notice = { text, until: performance.now() + NOTICE_MS };
+}
+
+/**
+ * Format seconds for hints ("850 ms", "12.3 s", "2 min 5 s").
+ *
+ * @param {number} s - Seconds.
+ * @returns {string} Text.
+ */
+function formatSeconds(s) {
+    if (!Number.isFinite(s)) return "?";
+    if (s < 1) return `${Math.round(s * 1000)} ms`;
+    if (s < 60) return `${s.toFixed(1)} s`;
+    return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
+}
+
+/** Order and wording of the counts in the run summary hint. */
+const SUMMARY_PARTS = [
+    ["ran", "ran"], ["cached", "cached"], ["skipped", "skipped"], ["blocked", "blocked"],
+    ["error", "failed"], ["interrupted", "interrupted"], ["not_reached", "not reached"],
+    ["running", "running"], ["pending", "pending"], ["changed", "changed since"],
+];
+
+/**
+ * Hint lines for the run view / replay.
+ *
+ * @param {Object} model - Flow model.
+ * @param {Array<string>} out - Receives the lines.
+ * @returns {void}
+ */
+function pushRunHints(model, out) {
+    const notice = lastRun.notice;
+    if (notice) {
+        if (performance.now() < notice.until) out.push(notice.text);
+        else lastRun.notice = null;
+    }
+    if (!lastRun.show) return;
+    const run = lastRun.run;
+    const view = lastRun.view;
+    if (!run) {
+        out.push(lastRun.fetching ? "Last run: loading..." :
+            lastRun.unavailable ? "Last run: unavailable (profiler endpoint not reachable)" : "Last run: nothing has run yet");
+        return;
+    }
+    if (view?.foreign) {
+        out.push("Last run: from a different workflow");
+        return;
+    }
+    const replay = lastRun.replay;
+    if (replay?.timeline) {
+        const events = replay.timeline.events;
+        const ev = events[replay.eventIndex];
+        const cachedCount = replay.timeline.cachedCount ?? 0;
+        // The cached nodes share one beat and count as one step.
+        const total = events.length - cachedCount + (cachedCount ? 1 : 0);
+        if (ev?.status === "cached") {
+            out.push(`Replay 1/${total}: ${cachedCount} cached node${cachedCount === 1 ? "" : "s"} (output reused)`);
+        } else if (ev) {
+            const n = model.nodes?.get(ev.execId)?.node;
+            const title = n ? formatNodeTitle(n) : ev.execId;
+            const step = replay.eventIndex - cachedCount + (cachedCount ? 2 : 1);
+            out.push(`Replay ${step}/${total}: ${title} (#${ev.execId}) -- ${ev.status} ${formatSeconds(ev.time)}`);
+        } else {
+            out.push(`Replay: done (${events.length} nodes)`);
+        }
+    }
+    const counts = view?.counts ?? {};
+    const parts = [];
+    for (const [key, label] of SUMMARY_PARTS) {
+        if (counts[key]) parts.push(`${counts[key]} ${label}`);
+    }
+    const outcome = run.status === "running" ? "running" :
+        run.status === "success" || run.status === "done" ? `finished in ${formatSeconds(run.total)}` :
+            `${run.status} after ${formatSeconds(run.total)}`;
+    out.push(`Last run: ${outcome}${parts.length ? ` -- ${parts.join(", ")}` : ""}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1211,10 +1622,47 @@ function updateTrace(model, graph) {
 function setRunningId(id) {
     const next = id === null || id === undefined || id === "" ? null : String(id);
     if (next === state.runId) return;
+    const now = performance.now();
+    // The node that just finished leaves an afterglow, so nodes faster than
+    // a frame still visibly blink.
+    if (state.runId) runAfterglow.set(state.runId, now);
+    if (runAfterglow.size > 64) pruneAfterglow(now); // overlay off: nothing else prunes
     state.runId = next;
-    state.runSince = performance.now();
+    state.runSince = now;
     // Nothing running -> drop the trace straight away (no settle delay).
     if (!next) state.runTraceId = null;
+}
+
+/** Exec id -> performance.now() when it stopped running (pruned after RUN_AFTERGLOW_MS). */
+const runAfterglow = new Map();
+
+/**
+ * Afterglow strength of a node (1 = just finished, 0 = gone): the strongest
+ * over its exec ids, including nodes expanded from them / inside a container.
+ *
+ * @param {Array<string>} execIds - Node exec ids.
+ * @param {number} now - Frame timestamp (ms).
+ * @returns {number} 0..1.
+ */
+function afterglowOf(execIds, now) {
+    let best = 0;
+    for (const [id, at] of runAfterglow) {
+        const v = 1 - (now - at) / RUN_AFTERGLOW_MS;
+        if (v > best && isRunningIn(execIds, id)) best = v;
+    }
+    return best;
+}
+
+/**
+ * Drop expired afterglows.
+ *
+ * @param {number} now - Frame timestamp (ms).
+ * @returns {void}
+ */
+function pruneAfterglow(now) {
+    for (const [id, at] of runAfterglow) {
+        if (now - at >= RUN_AFTERGLOW_MS) runAfterglow.delete(id);
+    }
 }
 
 /**
@@ -1268,7 +1716,17 @@ function resolveRunNode(id) {
  */
 function formatRunHint(node, id) {
     if (!node) return "";
-    let title = node.type;
+    return `Running: ${formatNodeTitle(node)} (#${id})`;
+}
+
+/**
+ * A node's display title for hints, truncated to GATE_TITLE_MAX.
+ *
+ * @param {Object} node - The node.
+ * @returns {string} Title.
+ */
+function formatNodeTitle(node) {
+    let title = node?.type;
     try {
         title = node.getTitle?.() || node.title || node.type;
     } catch {
@@ -1276,7 +1734,7 @@ function formatRunHint(node, id) {
     }
     title = String(title ?? "");
     if (title.length > GATE_TITLE_MAX) title = `${title.slice(0, GATE_TITLE_MAX - 1)}…`;
-    return `Running: ${title} (#${id})`;
+    return title;
 }
 
 /**
@@ -1577,6 +2035,282 @@ function drawHints(ctx, dpr, hints, now, cssW, cssH) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Badge Tooltips
+// ═══════════════════════════════════════════════════════════════════════════
+// The overlay is click-through (pointer-events: none), so the cursor is
+// watched with a passive capture-phase listener and hit-tested against the
+// badge positions every frame (same formulas as the drawing passes). The
+// tooltip is a body-level element that ignores the mouse too.
+
+/** Last known cursor: client coords, whether it is over the graph canvas area, buttons held. */
+const pointer = { x: 0, y: 0, inside: false, buttons: 0, installed: false };
+/** @type {HTMLDivElement|null} */
+let tooltipEl = null;
+/** Text currently shown (avoids DOM writes every frame). */
+let tooltipText = "";
+
+/**
+ * Start tracking the cursor (once). Capture phase, passive: never interferes
+ * with the canvas.
+ *
+ * @returns {void}
+ */
+function installPointerTracking() {
+    if (pointer.installed) return;
+    pointer.installed = true;
+    const track = (e) => {
+        pointer.x = e.clientX;
+        pointer.y = e.clientY;
+        pointer.buttons = e.buttons;
+        const host = app.canvas?.canvas?.parentElement;
+        pointer.inside = !!host && e.target instanceof Node && host.contains(e.target);
+    };
+    window.addEventListener("pointermove", track, { capture: true, passive: true });
+    window.addEventListener("pointerdown", (e) => {
+        track(e);
+        hideTooltip();
+    }, { capture: true, passive: true });
+    window.addEventListener("wheel", () => hideTooltip(), { capture: true, passive: true });
+    document.addEventListener("pointerleave", () => {
+        pointer.inside = false;
+        hideTooltip();
+    });
+}
+
+/**
+ * Show the tooltip near the cursor.
+ *
+ * @param {string} text - Text (newlines allowed).
+ * @returns {void}
+ */
+function showTooltip(text) {
+    if (!tooltipEl) {
+        tooltipEl = document.createElement("div");
+        tooltipEl.className = "enhutils-flow-tooltip";
+        Object.assign(tooltipEl.style, {
+            position: "fixed",
+            zIndex: "10000",
+            pointerEvents: "none",
+            maxWidth: "560px",
+            padding: "5px 8px",
+            borderRadius: "6px",
+            background: "rgba(0,0,0,0.85)",
+            color: "#eee",
+            font: "12px sans-serif",
+            whiteSpace: "pre-line",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
+        });
+    }
+    if (!tooltipEl.isConnected) document.body.appendChild(tooltipEl);
+    if (text !== tooltipText) {
+        tooltipText = text;
+        tooltipEl.textContent = text;
+    }
+    tooltipEl.style.display = "block";
+    const w = tooltipEl.offsetWidth;
+    const h = tooltipEl.offsetHeight;
+    const x = Math.min(pointer.x + 14, window.innerWidth - w - 4);
+    const y = pointer.y + 18 + h > window.innerHeight ? pointer.y - h - 8 : pointer.y + 18;
+    tooltipEl.style.left = `${Math.max(4, x)}px`;
+    tooltipEl.style.top = `${Math.max(4, y)}px`;
+}
+
+/**
+ * Hide the tooltip.
+ *
+ * @returns {void}
+ */
+function hideTooltip() {
+    if (tooltipEl && tooltipText !== "") {
+        tooltipEl.style.display = "none";
+        tooltipText = "";
+    }
+}
+
+/** Tooltip text per run status. */
+const RUN_TOOLTIPS = Object.freeze({
+    cached: "Cached -- its output was reused from an earlier run, it didn't run",
+    blocked: "Blocked -- an input carried an execution blocker, so it didn't run",
+    error: "Failed",
+    interrupted: "Interrupted -- the run was stopped here",
+    changed: "Changed since the run -- the run's record doesn't apply to it",
+});
+
+/**
+ * Run details of a node (summed time, first error message / change reason).
+ *
+ * @param {Array<string>} execIds - Node exec ids.
+ * @returns {{time: number, message: string|null, reason: string|null}} Details.
+ */
+function runDetailsOf(execIds) {
+    const out = { time: 0, message: null, reason: null };
+    const details = lastRun.view?.details;
+    if (!details) return out;
+    for (const id of execIds ?? []) {
+        const d = details.get(id);
+        if (!d) continue;
+        out.time += d.time ?? 0;
+        out.message ??= d.message;
+        out.reason ??= d.reason;
+    }
+    return out;
+}
+
+/** Max changed inner nodes named in a subgraph container's tooltip. */
+const CONTAINER_CHANGES_MAX = 4;
+
+/**
+ * Tooltip lines naming the changed nodes inside a subgraph container, each
+ * with its first change reason.
+ *
+ * @param {Array<string>} execIds - Container's exec ids.
+ * @param {Object} model - Flow model.
+ * @returns {string} Lines (each starting with a newline), or "".
+ */
+function containerChangeLines(execIds, model) {
+    const details = lastRun.view?.details;
+    if (!details) return "";
+    const lines = [];
+    let total = 0;
+    for (const id of execIds ?? []) {
+        const reason = details.get(id)?.reason;
+        if (!reason) continue;
+        total++;
+        if (lines.length >= CONTAINER_CHANGES_MAX) continue;
+        const node = model.nodes?.get(id)?.node;
+        const more = reason.includes("\n") ? " …" : "";
+        lines.push(`\n• ${node ? formatNodeTitle(node) : "node"} (#${id}): ${reason.split("\n")[0]}${more}`);
+    }
+    if (total > lines.length) lines.push(`\n+${total - lines.length} more`);
+    return lines.join("");
+}
+
+/**
+ * Tooltip text for a hit badge.
+ *
+ * @param {Object} hit - { kind, item, slot }.
+ * @param {Object} model - Flow model.
+ * @param {Object} graph - Viewed graph.
+ * @returns {string} Text, or "".
+ */
+function tooltipTextFor(hit, model, graph) {
+    const it = hit.item;
+    const node = it.node;
+    const info = it.info;
+    const head = `${formatNodeTitle(node)} (#${info.kind === "container" ? node?.id : info.execIds?.[0] ?? node?.id})`;
+    if (hit.kind === "run") {
+        const d = runDetailsOf(info.execIds);
+        let text = RUN_TOOLTIPS[it.status] ?? it.status;
+        if (it.status === "error" && d.message) text += `: ${d.message}`;
+        if (it.status === "changed" && d.reason && info.kind !== "container") text += `\n${d.reason}`;
+        if ((it.status === "error" || it.status === "interrupted") && d.time > 0) text += `\nRan ${formatSeconds(d.time)}`;
+        if (info.kind === "container") {
+            text = `Subgraph: something inside is ${it.status}\n${text}`;
+            if (it.status === "changed") text += containerChangeLines(info.execIds, model);
+        }
+        return `${head}\n${text}`;
+    }
+    if (hit.kind === "switch") return `${head}\nSwitch -- has lazy inputs: only the branch it picks is evaluated`;
+    if (hit.kind === "lazy") {
+        const name = node?.inputs?.[hit.slot]?.label || node?.inputs?.[hit.slot]?.name || `input ${hit.slot}`;
+        return `${head}\nLazy input "${name}" -- evaluated only if the node asks for it`;
+    }
+    if (hit.kind === "conditional") {
+        let gates = [];
+        try {
+            gates = model.getGateTrace?.(graph, node)?.gates ?? [];
+        } catch {
+            gates = [];
+        }
+        const shown = gates.slice(0, GATE_HINT_MAX).map(gateLabel).join(", ");
+        const more = gates.length > GATE_HINT_MAX ? ` +${gates.length - GATE_HINT_MAX} more` : "";
+        return `${head}\nMay not run -- only feeds some branches of a switch` +
+            (shown ? `\nDepends on: ${shown}${more}` : "");
+    }
+    return "";
+}
+
+/**
+ * Hit-test the badges of this frame's node items against a graph point.
+ * Mirrors the positions used by drawRunMarks / drawNodeMarks.
+ *
+ * @param {number} gx - Graph x.
+ * @param {number} gy - Graph y.
+ * @param {number} lw - Line width (graph units).
+ * @param {number} scale - Canvas zoom.
+ * @returns {Object|null} { kind, item, slot } or null.
+ */
+function hitTestBadges(gx, gy, lw, scale) {
+    const pad = lw * 0.5 + 2 / scale;
+    const b = markSize(BADGE_SCREEN_PX, scale);
+    const r = markSize(LAZY_DIAMOND_SCREEN_PX, scale);
+    const badgeR = b * 0.7; // a little more forgiving than the drawn radius
+    const dim = state.trace ? 1 - config.dimStrength : 1;
+    const near = (x, y, rad) => (gx - x) ** 2 + (gy - y) ** 2 <= rad * rad;
+    for (let i = nodeItemCount - 1; i >= 0; i--) {
+        const it = nodeItems[i];
+        if (!it.node) continue;
+        if (!it.inTrace && dim <= 0.001) continue;
+        const info = it.info;
+        if (it.status && RUN_BADGES[it.status]) {
+            const cx = it.x - pad + Math.max(b * 0.9, 8 + pad);
+            if (near(cx, it.y - pad, badgeR)) return { kind: "run", item: it };
+        }
+        if (!config.markLazy) continue;
+        const isHop = info.kind === "virtual" || info.kind === "bypassed";
+        const conditional = !!info.conditional && !isHop && !it.settled;
+        let cx = it.x + it.w + pad - Math.max(b * 0.9, 8 + pad);
+        if (info.isSwitch) {
+            if (near(cx, it.y - pad, badgeR)) return { kind: "switch", item: it };
+            for (const slot of info.lazySlots ?? []) {
+                let p = null;
+                try {
+                    p = it.node.getInputPos(slot);
+                } catch {
+                    p = null;
+                }
+                if (p && near(p[0], p[1], r * 1.6)) return { kind: "lazy", item: it, slot };
+            }
+            cx -= b * 1.3;
+        }
+        if (conditional && near(cx, it.y - pad, badgeR)) return { kind: "conditional", item: it };
+    }
+    return null;
+}
+
+/**
+ * Per-frame tooltip update (call while the node items still hold their nodes).
+ *
+ * @param {Object} model - Flow model.
+ * @param {Object} graph - Viewed graph.
+ * @param {HTMLCanvasElement} mainEl - LiteGraph canvas element.
+ * @param {number} lw - Line width (graph units).
+ * @param {number} scale - Canvas zoom.
+ * @param {number} ox - Canvas offset x.
+ * @param {number} oy - Canvas offset y.
+ * @returns {void}
+ */
+function updateTooltip(model, graph, mainEl, lw, scale, ox, oy) {
+    installPointerTracking();
+    if (!pointer.inside || pointer.buttons) {
+        hideTooltip();
+        return;
+    }
+    const rect = mainEl.getBoundingClientRect();
+    const sx = pointer.x - rect.left;
+    const sy = pointer.y - rect.top;
+    if (sx < 0 || sy < 0 || sx > rect.width || sy > rect.height) {
+        hideTooltip();
+        return;
+    }
+    // screen = (graph + offset) * scale  (DragAndScale.convertOffsetToCanvas)
+    const hit = hitTestBadges(sx / scale - ox, sy / scale - oy, lw, scale);
+    const text = hit ? tooltipTextFor(hit, model, graph) : "";
+    if (text) showTooltip(text);
+    else hideTooltip();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Frame Rendering
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1598,6 +2332,9 @@ const view = { x0: 0, y0: 0, x1: 0, y1: 0 };
 
 /** Hint lines for this frame. */
 const hintLines = [];
+
+/** Timestamp of the frame being rendered (ms). */
+let frameNow = 0;
 
 // ── Static Layer Hash ───────────────────────────────────────────────────────
 // The steady layer (washes, gradient links, outlines) only changes when the
@@ -1688,7 +2425,7 @@ function drawCachedLayer(ctx, st, overlay, k, ox, oy, draw) {
 function nextLinkItem() {
     let item = linkItems[linkItemCount];
     if (!item) {
-        item = { key: null, geom: null, info: null, ghost: false, inTrace: true, diamond: false, gate: false };
+        item = { key: null, runKey: null, geom: null, info: null, ghost: false, inTrace: true, diamond: false, gate: false, idle: false };
         linkItems.push(item);
     }
     linkItemCount++;
@@ -1705,6 +2442,7 @@ function nextNodeItem() {
     if (!item) {
         item = {
             node: null, info: null, x: 0, y: 0, w: 0, h: 0, inTrace: true, status: null, grey: false, gate: false,
+            running: false, settled: false, pending: false, glow: 0,
         };
         nodeItems.push(item);
     }
@@ -1738,13 +2476,15 @@ function collectLink(graph, link, model, renderMode) {
     item.info = model.getLinkInfo(graph, link.id);
     item.ghost = false;
     const info = item.info;
-    const needKey = state.trace || state.gate;
+    const needKey = state.trace || state.gate || lastRun.replay?.timeline;
     const key = needKey ? linkKey(graph, link.id) : null;
+    item.runKey = key;
     item.inTrace = state.trace ? state.trace.linkKeys.has(key) : true;
     item.gate = state.gate ? state.gate.linkKeys.has(key) : false;
     item.diamond = !!(info?.lazy && info.active) && !lazySlotCoveredBySwitch(graph, link, model);
+    item.idle = linkIdleInRun(info);
     hashMix(g.ver);
-    hashMix((item.inTrace ? 1 : 2) + (item.diamond ? 4 : 0));
+    hashMix((item.inTrace ? 1 : 2) + (item.diamond ? 4 : 0) + (item.idle ? 16 : 0));
 }
 
 /**
@@ -1843,11 +2583,13 @@ function collectGhosts(graph, model) {
             item.geom = g;
             item.info = seg;
             item.ghost = true;
+            item.runKey = seg.key;
+            item.idle = linkIdleInRun(seg);
             item.inTrace = state.trace ? state.trace.virtualKeys.has(seg.key) : true;
             item.gate = state.gate ? state.gate.virtualKeys.has(seg.key) : false;
             item.diamond = !!(seg.lazy && seg.active);
             hashMix(g.ver);
-            hashMix((item.inTrace ? 3 : 5) + (item.diamond ? 8 : 0));
+            hashMix((item.inTrace ? 3 : 5) + (item.diamond ? 8 : 0) + (item.idle ? 32 : 0));
         } catch (err) {
             warnOnce("failed to lay out a virtual segment", err);
         }
@@ -1896,17 +2638,21 @@ function collectNodes(graph, model) {
             const key = state.trace || state.gate ? nodeKey(graph, node) : null;
             item.inTrace = state.trace ? state.trace.nodeKeys.has(key) : true;
             item.gate = state.gate ? state.gate.nodeKeys.has(key) : false;
-            item.status = info.kind === "real" ? getRuntimeStatus(info.execIds) : null;
-            item.running = !!state.runId && (info.kind === "real" || info.kind === "container") &&
-                isRunningIn(info.execIds, state.runId);
-            item.grey = info.kind === "muted" || !info.active || STATUS_GREY.has(item.status) ||
+            const work = info.kind === "real" || info.kind === "container";
+            item.status = work ? getRuntimeStatus(info.execIds) : null;
+            item.running = item.status === "running" ||
+                (!!state.runId && work && isRunningIn(info.execIds, state.runId));
+            // A settled run status replaces the static "may not run" styling.
+            item.settled = RUN_SETTLED.has(item.status);
+            item.grey = info.kind === "muted" || (!info.active && !item.settled) || RUN_GREY.has(item.status) ||
                 !Number.isFinite(info.depth);
+            item.pending = item.status === "pending" && !!lastRun.replay?.timeline;
+            item.glow = !item.running && work && runAfterglow.size ? afterglowOf(info.execIds, frameNow) : 0;
             hashMix(b[0]);
             hashMix(b[1]);
             hashMix(b[2]);
             hashMix(b[3]);
-            // Runtime status only reaches the static layer through `grey`.
-            hashMix((item.grey ? 1 : 0) + (item.inTrace ? 2 : 0));
+            hashMix((item.grey ? 1 : 0) + (item.inTrace ? 2 : 0) + (item.pending ? 4 : 0) + statusCode(item.status) * 8);
         } catch (err) {
             warnOnce("failed to read node info", err);
         }
@@ -1922,6 +2668,8 @@ function collectNodes(graph, model) {
  */
 function computeWaves(now, maxDepth) {
     waves.n = 0;
+    // The run view shows what happened, not the predicted flow: no ambient waves.
+    if (runViewActive()) return;
     const T = (now - state.epoch) / 1000 / config.secondsPerStep;
     const interval = Math.max(0.05, config.waveInterval / config.secondsPerStep);
     const life = maxDepth + 1;
@@ -1956,6 +2704,9 @@ function drawWashes(ctx, tracing) {
         if (it.grey) {
             if (kind === "virtual" || kind === "bypassed") continue;
             ctx.globalAlpha = 1;
+        } else if (it.pending) {
+            // Replay: not reached yet.
+            ctx.globalAlpha = 0.6;
         } else if (tracing && !it.inTrace && traceAlpha > 0.01) {
             ctx.globalAlpha = traceAlpha;
         } else {
@@ -1990,7 +2741,7 @@ function drawSteadyLinks(ctx, maxDepth, lw, scale, dim) {
         if (a <= 0.001) continue;
         const info = it.info;
         ctx.setLineDash(it.ghost ? ghostDash : noDash);
-        if (!info || !info.active) {
+        if (!info || !info.active || it.idle) {
             ctx.globalAlpha = 0.3 * opacity * a;
             ctx.strokeStyle = GREY;
             ctx.lineWidth = lw * 0.6;
@@ -2112,7 +2863,7 @@ function drawNodeMarks(ctx, maxDepth, lw, scale, dim) {
         // runs: they keep the faint outline but get no "?" badge (they would
         // otherwise dominate the badges on Set/Get-heavy workflows).
         const isHop = info.kind === "virtual" || info.kind === "bypassed";
-        const conditional = !!info.conditional && !isHop;
+        const conditional = !!info.conditional && !isHop && !it.settled;
         if (!isSwitch && !conditional) continue;
         const a = it.inTrace ? 1 : dim;
         if (a <= 0.001) continue;
@@ -2163,6 +2914,56 @@ function drawNodeMarks(ctx, maxDepth, lw, scale, dim) {
 }
 
 /**
+ * Last-run marks: a coloured outline on failed nodes and a status badge
+ * (cached / blocked / failed / interrupted / changed since the run) at the
+ * top-left corner, at constant screen size. Drawn whatever the gradient /
+ * marks settings say -- they are the run view's content.
+ *
+ * @param {CanvasRenderingContext2D} ctx - Overlay context (graph transform).
+ * @param {number} lw - Line width in graph units.
+ * @param {number} scale - Canvas zoom.
+ * @param {number} dim - Alpha multiplier outside the trace.
+ * @returns {void}
+ */
+function drawRunMarks(ctx, lw, scale, dim) {
+    const pad = lw * 0.5 + 2 / scale;
+    const b = markSize(BADGE_SCREEN_PX, scale);
+    const font = `bold ${(b * 0.8).toFixed(2)}px sans-serif`;
+    ctx.setLineDash([]);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < nodeItemCount; i++) {
+        const it = nodeItems[i];
+        const badge = it.status ? RUN_BADGES[it.status] : null;
+        if (!badge) continue;
+        const a = it.inTrace ? 1 : dim;
+        if (a <= 0.001) continue;
+        const outline = RUN_OUTLINE_COLORS[it.status];
+        if (outline) {
+            ctx.globalAlpha = a;
+            ctx.strokeStyle = outline;
+            ctx.lineWidth = lw;
+            ctx.beginPath();
+            addRoundRect(ctx, it.x - pad, it.y - pad, it.w + pad * 2, it.h + pad * 2, 8 + pad);
+            ctx.stroke();
+        }
+        const cx = it.x - pad + Math.max(b * 0.9, 8 + pad);
+        const cy = it.y - pad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, b * 0.55, 0, Math.PI * 2);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = BADGE_BG;
+        ctx.fill();
+        ctx.strokeStyle = badge.color;
+        ctx.lineWidth = b * 0.1;
+        ctx.stroke();
+        ctx.fillStyle = badge.color;
+        ctx.font = font;
+        ctx.fillText(badge.glyph, cx, cy + b * 0.04);
+    }
+}
+
+/**
  * Steady node outlines in depth colours (faint when conditional).
  *
  * @param {CanvasRenderingContext2D} ctx - Overlay context (graph transform).
@@ -2182,12 +2983,18 @@ function drawNodeOutlines(ctx, maxDepth, lw, scale, dim) {
         if (a <= 0.001) continue;
         const hop = info.kind === "virtual" || info.kind === "bypassed";
         if (it.grey) {
-            ctx.globalAlpha = 0.6 * a;
+            // Recessive, like the selection dimming: the wash says "didn't
+            // run"; a bright border would read as highlighted.
+            if (hop) continue;
+            ctx.globalAlpha = GREY_OUTLINE_ALPHA * a;
             ctx.strokeStyle = GREY;
-            ctx.lineWidth = lw * (hop ? 0.35 : 0.5);
+            ctx.lineWidth = lw * 0.35;
         } else {
-            ctx.globalAlpha = config.opacity * a * (config.markLazy && info.conditional ? 0.5 : 1);
+            const faded = (config.markLazy && info.conditional && !it.settled) ||
+                it.status === "cached" || it.status === "changed";
+            ctx.globalAlpha = config.opacity * a * (faded ? 0.5 : 1);
             ctx.lineWidth = lw * (hop ? 0.35 : 0.6);
+            if (RUN_OUTLINE_COLORS[it.status]) continue; // drawn by drawRunMarks
             if (info.kind === "container" && Number.isFinite(info.depthEnd) && info.depthEnd !== info.depth) {
                 const grad = ctx.createLinearGradient(it.x, it.y, it.x + it.w, it.y);
                 grad.addColorStop(0, hueColor(hueOf(info.depth, maxDepth)));
@@ -2222,7 +3029,7 @@ function drawPulses(ctx, maxDepth, lw, scale, dpr) {
     for (let i = 0; i < linkItemCount; i++) {
         const it = linkItems[i];
         const info = it.info;
-        if (!it.inTrace || !info || !info.active) continue;
+        if (!it.inTrace || !info || !info.active || it.idle) continue;
         const g = it.geom;
         const t0 = info.t0;
         const dt = info.t1 - t0;
@@ -2262,6 +3069,64 @@ function drawPulses(ctx, maxDepth, lw, scale, dpr) {
             ctx.lineWidth = lw * 0.5;
             strokeSubPath(ctx, g, s0, s1);
         }
+    }
+    ctx.shadowBlur = 0;
+}
+
+/** Replay: link / ghost key -> head position (0..1) along it this frame. */
+const replayHeads = new Map();
+
+/**
+ * Replay pulses: during a node's travel phase, a dash runs along every link /
+ * ghost that fed it (from nodes that were reached), in the node's depth colour.
+ *
+ * @param {CanvasRenderingContext2D} ctx - Line-layer context (graph transform).
+ * @param {Object} model - Flow model.
+ * @param {number} maxDepth - Model max depth.
+ * @param {number} lw - Line width in graph units.
+ * @param {number} scale - Canvas zoom.
+ * @param {number} dpr - Device pixel ratio.
+ * @returns {void}
+ */
+function drawReplayPulses(ctx, model, maxDepth, lw, scale, dpr) {
+    const replay = lastRun.replay;
+    const ev = replay?.timeline?.events[replay.eventIndex];
+    if (!ev?.segs.length) return;
+    const t = lastRun.replayTime;
+    if (t >= ev.t1 || ev.t1 <= ev.t0) return;
+    const p = (t - ev.t0) / (ev.t1 - ev.t0);
+    replayHeads.clear();
+    for (const s of ev.segs) {
+        if (p < s.f0 || p > s.f1 || s.f1 <= s.f0) continue;
+        const local = (p - s.f0) / (s.f1 - s.f0);
+        replayHeads.set(s.key, Math.max(replayHeads.get(s.key) ?? 0, local));
+    }
+    if (!replayHeads.size) return;
+    const color = hueColor(hueOf(model.nodes?.get(ev.execId)?.depth ?? 0, maxDepth));
+    const dashBase = Math.max(DASH_GRAPH_LENGTH, DASH_MIN_SCREEN_PX / scale);
+    ctx.setLineDash([]);
+    ctx.lineCap = "round";
+    for (let i = 0; i < linkItemCount; i++) {
+        const it = linkItems[i];
+        const local = it.runKey == null ? undefined : replayHeads.get(it.runKey);
+        if (local === undefined) continue;
+        const g = it.geom;
+        const dashLen = Math.min(g.len, dashBase * 1.5);
+        const head = local * (g.len + dashLen);
+        const s0 = Math.max(0, head - dashLen);
+        const s1 = Math.min(g.len, head);
+        if (s1 <= s0) continue;
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12 * dpr;
+        ctx.lineWidth = lw * 1.8;
+        strokeSubPath(ctx, g, s0, s1);
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 0.7;
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = lw * 0.6;
+        strokeSubPath(ctx, g, s0, s1);
     }
     ctx.shadowBlur = 0;
 }
@@ -2388,7 +3253,7 @@ function drawGateRings(ctx, now, maxDepth, lw, scale, dpr) {
 
 /**
  * Running-node ring: a bright white, pulsing ring around the node the backend
- * is executing (or the subgraph containing it), drawn on top of everything
+ * is executing (or the subgraph containing it, or the node a replay is at), drawn on top of everything
  * else so it stays visible over the flow colours. Same style as the gate
  * ring, but wider and faster so the two can be told apart when both show.
  *
@@ -2400,13 +3265,27 @@ function drawGateRings(ctx, now, maxDepth, lw, scale, dpr) {
  * @returns {void}
  */
 function drawRunRings(ctx, now, lw, scale, dpr) {
-    if (!state.runId) return;
+    if (!state.runId && !lastRun.replay?.timeline && !runAfterglow.size) return;
     const p = 0.5 + 0.5 * Math.sin(now / 120);
     const pad = lw * 2.5 + 10 / scale;
     ctx.setLineDash([]);
     for (let i = 0; i < nodeItemCount; i++) {
         const it = nodeItems[i];
-        if (!it.running) continue;
+        if (!it.running) {
+            if (it.glow > 0.01) {
+                // Afterglow of a node that just finished: the ring fading out.
+                ctx.globalAlpha = it.glow;
+                ctx.strokeStyle = GATE_RING;
+                ctx.shadowColor = GATE_RING;
+                ctx.shadowBlur = 16 * dpr * it.glow;
+                ctx.lineWidth = lw * (0.6 + 0.8 * it.glow);
+                ctx.beginPath();
+                addRoundRect(ctx, it.x - pad, it.y - pad, it.w + pad * 2, it.h + pad * 2, 12 + pad);
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+            }
+            continue;
+        }
         const x = it.x - pad;
         const y = it.y - pad;
         const w = it.w + pad * 2;
@@ -2501,6 +3380,10 @@ function renderFrame(now) {
         gradCache.clear();
         state.traceKey = null;
     }
+    frameNow = now;
+    pruneAfterglow(now);
+    if (lastRun.show) getRunView(model);
+    updateReplay(now, model);
     updateRunTrace(now);
     updateTrace(model, graph);
     if (checkTransientOff(graph)) return;
@@ -2510,6 +3393,7 @@ function renderFrame(now) {
     }
     if (state.gateHint) hintLines.push(state.gateHint);
     if (model.noOutputs) hintLines.push("Flow: no output nodes -- showing all");
+    pushRunHints(model, hintLines);
 
     const scale = ds.scale || 1;
     const ox = ds.offset[0];
@@ -2562,6 +3446,7 @@ function renderFrame(now) {
     });
     lctx.setTransform(k, 0, 0, k, k * ox, k * oy);
     drawPulses(lctx, maxDepth, lw, scale, dpr);
+    drawReplayPulses(lctx, model, maxDepth, lw, scale, dpr);
     drawGateLinks(lctx, now, maxDepth, lw, scale, dpr);
     lctx.setTransform(1, 0, 0, 1, 0, 0);
     lctx.globalAlpha = 1;
@@ -2571,11 +3456,18 @@ function renderFrame(now) {
         drawWashes(sctx, !!state.trace);
         if (config.showGradient) drawNodeOutlines(sctx, maxDepth, lw, scale, dim);
         if (config.markLazy) drawNodeMarks(sctx, maxDepth, lw, scale, dim);
+        drawRunMarks(sctx, lw, scale, dim);
     });
     ctx.setTransform(k, 0, 0, k, k * ox, k * oy);
     drawNodeFlashes(ctx, now, maxDepth, lw, scale, dpr);
     drawGateRings(ctx, now, maxDepth, lw, scale, dpr);
     drawRunRings(ctx, now, lw, scale, dpr);
+
+    try {
+        updateTooltip(model, graph, mainEl, lw, scale, ox, oy);
+    } catch (err) {
+        warnOnce("failed to update the badge tooltip", err);
+    }
 
     // Release node references held by the pools.
     for (let i = 0; i < nodeItemCount; i++) nodeItems[i].node = null;
@@ -2668,6 +3560,7 @@ function stopLoop() {
     state.rebuildTimer = 0;
     removeOverlay();
     removeLinesCanvas();
+    hideTooltip();
     for (const st of [state.staticLines, state.staticNodes]) {
         if (st.canvas) {
             st.canvas.width = 0;
@@ -2706,6 +3599,9 @@ function setMode(mode) {
     state.transientGraph = null;
     state.traceKey = null;
     if (mode === "off") {
+        // The run view is part of the overlay.
+        lastRun.show = false;
+        lastRun.replay = null;
         if (prev !== "off") stopLoop();
     } else if (prev === "off") {
         startLoop();
@@ -2828,13 +3724,13 @@ function setSetting(id, value) {
 
 /**
  * Canvas context-menu entry: a "Flow visualization" submenu with the show /
- * hide toggle and the lines over / under nodes toggle.
+ * hide toggle, the last-run view and replay, and the lines over / under
+ * nodes toggle.
  *
  * @returns {Array<Object|null>} Menu items (null = separator).
  */
 function buildCanvasMenuItems() {
     return [
-        null,
         {
             content: "Flow visualization",
             has_submenu: true,
@@ -2843,6 +3739,14 @@ function buildCanvasMenuItems() {
                     {
                         content: state.mode === "off" ? "Show" : "Hide",
                         callback: () => toggleMode(),
+                    },
+                    {
+                        content: lastRun.show ? "Hide last run" : "Show last run",
+                        callback: () => showLastRun(!lastRun.show),
+                    },
+                    {
+                        content: "Replay last run",
+                        callback: () => replayLastRun(),
                     },
                     {
                         content: config.linesUnder ? "Draw lines over nodes" : "Draw lines under nodes",
@@ -3023,6 +3927,33 @@ const SETTINGS = [
         },
     },
     {
+        id: SETTING_REPLAY_DURATION,
+        name: "Flow Visualizer - Replay length (s)",
+        type: "number",
+        attrs: { min: 3, max: 120, step: 1 },
+        defaultValue: 12,
+        sortOrder: 12,
+        tooltip: "Target length of a \"Replay last run\" animation. Every node holds at least the minimum below, " +
+            "plus extra time that grows with how long it really took; only that extra is compressed to fit, " +
+            "so workflows with many nodes can take longer.",
+        onChange: (v) => {
+            config.replayDuration = clampNumber(v, 3, 120, 12);
+        },
+    },
+    {
+        id: SETTING_REPLAY_MIN_NODE,
+        name: "Flow Visualizer - Replay minimum per node (ms)",
+        type: "number",
+        attrs: { min: 100, max: 3000, step: 50 },
+        defaultValue: 500,
+        sortOrder: 11,
+        tooltip: "Shortest time a node is shown running during \"Replay last run\", so fast nodes stay visible. " +
+            "All cached nodes share one beat of this length at the start.",
+        onChange: (v) => {
+            config.replayMinNodeMs = clampNumber(v, 100, 3000, 500);
+        },
+    },
+    {
         id: SETTING_SOURCE_PLACEMENT,
         name: "Flow Visualizer - Source placement",
         type: "combo",
@@ -3055,6 +3986,9 @@ for (const setting of SETTINGS) {
 // Extension Registration
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Canvas menu: section of the shared Enhancement Utils block (after Follow execution).
+registerCanvasMenuSection(30, () => buildCanvasMenuItems());
+
 app.registerExtension({
     name: EXTENSION_NAME,
 
@@ -3068,21 +4002,20 @@ app.registerExtension({
             function: () => toggleMode(),
             active: () => state.mode !== "off",
         },
+        {
+            id: "EnhUtils.Flow.ShowLastRun",
+            label: "Toggle flow visualization of the last run",
+            icon: "pi pi-history",
+            function: () => showLastRun(!lastRun.show),
+            active: () => lastRun.show,
+        },
+        {
+            id: "EnhUtils.Flow.ReplayLastRun",
+            label: "Replay last run (flow visualization)",
+            icon: "pi pi-replay",
+            function: () => replayLastRun(),
+        },
     ],
-
-    /**
-     * Canvas right-click menu items (new extension API, present in 1.53 and 1.57).
-     *
-     * @returns {Array<Object|null>} Menu items.
-     */
-    getCanvasMenuItems() {
-        try {
-            return buildCanvasMenuItems();
-        } catch (err) {
-            warnOnce("failed to build the canvas menu", err);
-            return [];
-        }
-    },
 
     /**
      * Node right-click menu items (new extension API).
@@ -3110,7 +4043,8 @@ app.registerExtension({
     },
 
     /**
-     * Track the executing node for the running ring / running trace.
+     * Track the executing node for the running ring / running trace, and
+     * keep the last-run record current from the profiler's events.
      *
      * @returns {void}
      */
@@ -3120,6 +4054,9 @@ app.registerExtension({
             for (const type of ["execution_start", "execution_success", "execution_error", "execution_interrupted"]) {
                 api.addEventListener(type, () => setRunningId(null));
             }
+            api.addEventListener("execution_start", ({ detail }) => onRunStart(detail));
+            api.addEventListener("enhutils.profiler.node_state", ({ detail }) => onNodeState(detail));
+            api.addEventListener("enhutils.profiler.execution_end", () => onRunEnd());
         } catch (err) {
             warnOnce("failed to listen for execution events", err);
         }
