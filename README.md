@@ -69,11 +69,11 @@ To access profiling data programmatically within your workflow (e.g., for loggin
 
 | Option | Description |
 |--------|-------------|
-| **Go to Node** | Hierarchical submenu listing all nodes grouped by type. Click any node to center the viewport on it. Supports subgraph navigation -- clicking a node inside a subgraph will navigate into that subgraph first. |
+| **Go to Node...** | Search box with a live filtered list of every node, subgraphs included. Type a node number (`12` / `#12`), a subgraph path (`5:12`) or part of a title or type. Typing a subgraph's name also lists everything inside it, below the direct matches; `5:` lists only what's inside subgraph #5, and `5: vae` filters within it. Renamed nodes show their original node name on the right; click it (or the funnel icon on other nodes) to list every node of that type, or click a `subgraph` badge to list its contents. **Tab** does the same for the highlighted row. Results show where the node lives (`Upscale (#5) > VAE Decode (#12)`); muted and bypassed nodes are dimmed. When a subgraph is open, its nodes are listed first. Up/Down + Enter or click to jump (navigating into subgraphs as needed), Esc to close. Also available as the `Search graph nodes` command, so you can bind a key to it. |
 | **Follow Execution** | Toggle that auto-pans the canvas to track the currently executing node in real time. |
 | **Show Executing Node** | One-shot jump to whichever node is currently running (only appears during execution). |
 
-<img src="docs/images/goto_node_menu.png" width="600" alt="Go to Node hierarchical menu with subgraph support">
+<img src="docs/images/goto_node_search.png" width="600" alt="Go to Node search panel with subgraph breadcrumbs">
 
 Additionally draws a **green border** around the currently executing node.
 
@@ -394,6 +394,9 @@ ComfyUI-Enhancement-Utils/
         ├── utils.js                   # Shared subgraph/exec-ID utilities
         ├── graphArrange.js            # Graph layout algorithms + menu
         ├── nodeNavigation.js          # Go to Node, Follow Execution
+        ├── nodeSearch.js              # "Go to node..." search panel
+        ├── nodeSearchMatch.js         # Node search collection + matching (pure)
+        ├── nodeSearch.css             # Node search panel styling
         ├── nodeProfiler.js            # Execution time badges (both renderers)
         ├── playSound.js               # PlaySound client handler
         ├── systemNotification.js      # Browser Notification handler

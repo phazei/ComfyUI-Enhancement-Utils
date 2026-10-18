@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Guidelines for working on this project. Read this before making changes.
 
@@ -35,9 +35,10 @@ This is NOT a kitchen-sink package. Features are included because they fill real
 - Console warnings use prefix: `[EnhancementUtils]`
 - Vendored JS libraries go in `js/lib/` -- they get auto-loaded too (UMD bundles set globals like `window.dagre`, `window.ELK`)
 - CSS is loaded manually via `<link>` tag injection from JS (ComfyUI only auto-loads `.js` files, not `.css`)
-- Shared utilities in `js/utils.js` -- `getUniqueIdFromNode()`, `nodeMatchesUniqueId()`, `findNodeByExecutionId()`, `findNodePath()`
+- Shared utilities in `js/utils.js` -- `getUniqueIdFromNode()`, `nodeMatchesUniqueId()`, `findNodeByExecutionId()`, `findNodePath()`, `focusNode()` (centre on a node, entering subgraphs as needed)
 - Shared graph/history module in `js/resourceMonitorGraph.js` -- exports `MetricHistory` class and popup API (`showGraphPopup`, `showMultiGraphPopup`, `hideGraphPopup`, etc.). Imported by `resourceMonitor.js` via ES module import. Does not register an extension itself.
 - New JS extensions: add to `js/`, follow the `app.registerExtension` pattern
+- Node search (`js/nodeSearch.js` UI + `js/nodeSearchMatch.js` pure matching, tested by `node tests/nodeSearch.test.mjs`): "Go to node..." canvas menu entry (replaced the old hierarchical submenu) and the `EnhUtils.Navigation.SearchNodes` command, both registered in `nodeNavigation.js`. Body-level fixed panel; entries collected once on open (root + all subgraphs, containers included). Query `12`/`#12` = local id at any depth, `5:12` = exec path (exact, then descendants), `5:` / `5:3: vae` = scope (only nodes inside that subgraph, rest of the query filters them; exec paths in the rest are relative), else exact type (ranked just below ids), then title/type substring, plus (lowest rank, non-numeric queries only) every word found in title/type/subgraph path -- so a subgraph's name lists its contents. Sort: scope (only when a subgraph is on screen: its nodes, then nested, then rest -- above rank; at root no grouping), rank, depth, parent breadcrumb, containers before regular nodes, label. Arrow keys only move the highlight -- the canvas moves on Enter/click (`focusNode`). The right side shows the type's display name (`nodeData.display_name`, else the class's static `title` for JS-only nodes, else the type) only when the node is renamed; class id goes in the row tooltip. Type matching (exact and substring) checks both class id and display name. Clicking that display name fills the box with it; unrenamed nodes get a `pi-filter` funnel (space reserved, visible only on the highlighted row) that does the same; clicking the `subgraph` badge fills `<execId>: ` (all stop propagation so the row doesn't jump). Tab applies the highlighted row's filter (`filterQueryFor`)
 
 #### Plain JS Extensions (no build step)
 

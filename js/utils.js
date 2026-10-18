@@ -169,3 +169,33 @@ export function findNodePath(targetNode, graph, path) {
     }
     return null;
 }
+
+// ── Navigation ────────────────────────────────────────────────────────────
+
+/**
+ * Center the canvas viewport on a node, navigating into subgraphs first if
+ * the node isn't in the currently displayed graph.
+ *
+ * @param {Object} node - The node to focus on.
+ * @returns {void}
+ */
+export function focusNode(node) {
+    if (!node) return;
+
+    const centerOnNode = () => app.canvas.centerOnNode(node);
+
+    if (app.canvas.graph !== node.graph) {
+        // Node is inside a subgraph -- navigate to it first.
+        const path = findNodePath(node);
+        if (path) {
+            app.canvas.setGraph(app.graph); // Reset to root.
+            for (let i = 1; i < path.length; i++) {
+                app.canvas.openSubgraph(path[i]);
+            }
+        }
+        // Defer centering until after the graph switch renders.
+        setTimeout(centerOnNode, 0);
+    } else {
+        centerOnNode();
+    }
+}

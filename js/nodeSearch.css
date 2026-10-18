@@ -1,0 +1,161 @@
+/* Node search panel ("Search graph nodes..."), see nodeSearch.js. */
+
+.enhutils-nodesearch {
+    position: fixed;
+    top: 12vh;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1100;
+    width: min(640px, calc(100vw - 32px));
+    display: flex;
+    flex-direction: column;
+    background: var(--comfy-menu-bg, #353535);
+    color: var(--fg-color, #ddd);
+    border: 1px solid var(--border-color, #4e4e4e);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    font-size: 14px;
+    overflow: hidden;
+}
+
+.enhutils-nodesearch-inputwrap {
+    position: relative;
+}
+
+.enhutils-nodesearch-clear {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--input-text, #ddd);
+    font-size: 18px;
+    line-height: 24px;
+    opacity: 0.6;
+    cursor: pointer;
+}
+
+.enhutils-nodesearch-clear:hover {
+    opacity: 1;
+    background: var(--comfy-menu-secondary-bg, #444);
+}
+
+.enhutils-nodesearch-clear[hidden] {
+    display: none;
+}
+
+.enhutils-nodesearch-input {
+    box-sizing: border-box;
+    width: 100%;
+    padding: 10px 40px 10px 12px;
+    border: none;
+    border-bottom: 1px solid var(--border-color, #4e4e4e);
+    outline: none;
+    background: var(--comfy-input-bg, #222);
+    color: var(--input-text, #ddd);
+    font-size: 15px;
+}
+
+.enhutils-nodesearch-list {
+    max-height: 50vh;
+    overflow-y: auto;
+}
+
+.enhutils-nodesearch-row {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 5px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.enhutils-nodesearch-selected {
+    background: var(--comfy-menu-secondary-bg, #444);
+}
+
+.enhutils-nodesearch-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.enhutils-nodesearch-crumb,
+.enhutils-nodesearch-sep {
+    opacity: 0.6;
+}
+
+.enhutils-nodesearch-meta {
+    flex: 0 1 auto;
+    display: flex;
+    gap: 6px;
+    min-width: 0;
+    font-size: 12px;
+    opacity: 0.6;
+}
+
+.enhutils-nodesearch-type {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+
+.enhutils-nodesearch-tag {
+    padding: 0 5px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+}
+
+/* Type text and subgraph badge: click fills the search box. */
+.enhutils-nodesearch-fill {
+    cursor: pointer;
+}
+
+.enhutils-nodesearch-fill:hover {
+    text-decoration: underline;
+    color: var(--fg-color, #fff);
+}
+
+/* Funnel ("show all of this type"): space reserved, visible on the highlighted row. */
+.enhutils-nodesearch-filter {
+    visibility: hidden;
+    align-self: center;
+    font-size: 12px;
+}
+
+.enhutils-nodesearch-selected .enhutils-nodesearch-filter {
+    visibility: visible;
+}
+
+.enhutils-nodesearch-filter:hover {
+    text-decoration: none;
+}
+
+.enhutils-nodesearch-meta:has(.enhutils-nodesearch-fill:hover) {
+    opacity: 1;
+}
+
+.enhutils-nodesearch-tag-bypassed {
+    color: #c77dff;
+}
+
+.enhutils-nodesearch-inactive .enhutils-nodesearch-label {
+    opacity: 0.45;
+}
+
+.enhutils-nodesearch-empty,
+.enhutils-nodesearch-footer {
+    padding: 6px 12px;
+    font-size: 12px;
+    opacity: 0.6;
+}
+
+.enhutils-nodesearch-footer {
+    border-top: 1px solid var(--border-color, #4e4e4e);
+}

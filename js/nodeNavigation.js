@@ -2,8 +2,10 @@
  * Node Navigation extension -- "Go to Node", "Follow Execution", and running node highlight.
  *
  * Features:
- * 1. "Go to Node" -- hierarchical right-click menu to jump to any node, grouped by
- *    type, with full subgraph support.
+ * 1. "Go to node..." -- opens the node search panel (`nodeSearch.js`): a filterable
+ *    list of every node, subgraphs included. Also the
+ *    `EnhUtils.Navigation.SearchNodes` command, bindable to a key. Replaces the
+ *    original hierarchical "Go to node" submenu.
  * 2. "Follow Execution" -- auto-pans the canvas to track the currently executing node.
  * 3. "Show executing node" -- one-shot jump to the currently running node.
  * 4. Running/error highlight -- draws a colored border around executing or errored nodes.
@@ -13,10 +15,20 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { findNodeByExecutionId, findNodePath } from "./utils.js";
+import { findNodeByExecutionId, focusNode } from "./utils.js";
+import { openNodeSearch } from "./nodeSearch.js";
 
 app.registerExtension({
     name: "phazei.NodeNavigation",
+
+    commands: [
+        {
+            id: "EnhUtils.Navigation.SearchNodes",
+            label: "Search graph nodes",
+            icon: "pi pi-search",
+            function: () => openNodeSearch(),
+        },
+    ],
 
     setup() {
         /** Whether the canvas should auto-pan to follow execution. */
@@ -26,34 +38,7 @@ app.registerExtension({
         let focusDebounceId = null;
 
         // ── Subgraph Navigation Helpers ────────────────────────────────
-        // findNodePath and findNodeByExecutionId are imported from utils.js.
-
-        /**
-         * Center the canvas viewport on a node, navigating into subgraphs
-         * if the node isn't in the currently displayed graph.
-         *
-         * @param {Object} node - The node to focus on.
-         */
-        const focusNode = (node) => {
-            if (!node) return;
-
-            const centerOnNode = () => app.canvas.centerOnNode(node);
-
-            if (app.canvas.graph !== node.graph) {
-                // Node is inside a subgraph -- navigate to it first.
-                const path = findNodePath(node);
-                if (path) {
-                    app.canvas.setGraph(app.graph); // Reset to root.
-                    for (let i = 1; i < path.length; i++) {
-                        app.canvas.openSubgraph(path[i]);
-                    }
-                }
-                // Defer centering until after the graph switch renders.
-                setTimeout(centerOnNode, 0);
-            } else {
-                centerOnNode();
-            }
-        };
+        // focusNode and findNodeByExecutionId are imported from utils.js.
 
         // ── Follow Execution ───────────────────────────────────────────
 
@@ -115,68 +100,6 @@ app.registerExtension({
             ctx.restore();
         };
 
-        // ── "Go to Node" Menu ──────────────────────────────────────────
-
-        /**
-         * Build a hierarchical menu of all nodes in a graph, grouped by type,
-         * with subgraph entries that expand recursively.
-         *
-         * @param {Object} graph - The graph to build the menu for.
-         * @param {Object} activeGraph - The currently displayed graph (for "* " prefix).
-         * @returns {Array} Menu option objects for LiteGraph's context menu.
-         */
-        const buildGoToNodeMenu = (graph, activeGraph) => {
-            const nodes = graph._nodes || graph.nodes || [];
-            const typeGroups = {};
-            const subgraphs = [];
-
-            for (const node of nodes) {
-                if (node.subgraph) {
-                    subgraphs.push(node);
-                } else {
-                    if (!typeGroups[node.type]) typeGroups[node.type] = [];
-                    typeGroups[node.type].push(node);
-                }
-            }
-
-            const options = [];
-
-            // Subgraph entries (sorted by X position on canvas).
-            subgraphs.sort((a, b) => a.pos[0] - b.pos[0]).forEach((node) => {
-                const isActive = node.subgraph === activeGraph;
-                const prefix = isActive ? "* " : "";
-                options.push({
-                    content: `${prefix}[SUBGRAPH] (#${node.id}) ${node.getTitle()}`,
-                    has_submenu: true,
-                    submenu: {
-                        options: [
-                            { content: "Go to this Subgraph node", callback: () => focusNode(node) },
-                            null, // separator
-                            ...buildGoToNodeMenu(node.subgraph, activeGraph),
-                        ],
-                    },
-                });
-            });
-
-            // Regular nodes grouped by type (sorted alphabetically).
-            Object.keys(typeGroups).sort().forEach((type) => {
-                options.push({
-                    content: type,
-                    has_submenu: true,
-                    submenu: {
-                        options: typeGroups[type]
-                            .sort((a, b) => a.pos[0] - b.pos[0])
-                            .map((node) => ({
-                                content: `${node.getTitle()} - #${node.id} (${Math.round(node.pos[0])}, ${Math.round(node.pos[1])})`,
-                                callback: () => focusNode(node),
-                            })),
-                    },
-                });
-            });
-
-            return options;
-        };
-
         // ── Canvas Context Menu Additions ──────────────────────────────
 
         const origGetCanvasMenuOptions = LGraphCanvas.prototype.getCanvasMenuOptions;
@@ -203,12 +126,10 @@ app.registerExtension({
                 });
             }
 
-            // "Go to node" hierarchical submenu.
-            const isRootActive = app.canvas.graph === app.graph;
+            // Node search panel (by number, subgraph path, title or type).
             options.push({
-                content: `${isRootActive ? "* " : ""}Go to node`,
-                has_submenu: true,
-                submenu: { options: buildGoToNodeMenu(app.graph, app.canvas.graph) },
+                content: "Go to node...",
+                callback: () => openNodeSearch(),
             });
 
             return options;

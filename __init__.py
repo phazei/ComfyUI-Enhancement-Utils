@@ -11,7 +11,7 @@ improving features from several community packages:
 - **ParseJSON**: Parse and merge JSON strings into a native Python object for any-type inputs.
 - **PlaySound**: Play a sound when a workflow step (or the whole queue) completes.
 - **SystemNotification**: Browser notification on workflow completion.
-- **Node Navigation**: "Go to Node" menu, "Follow Execution" camera tracking.
+- **Node Navigation**: "Go to Node" search panel, "Follow Execution" camera tracking.
 - **Graph Arrange**: Auto-arrange nodes (float left / float right).
 
 All nodes use the V3 schema (comfy_api). Frontend extensions are plain JS.
