@@ -1,11 +1,24 @@
 [project]
 name = "comfyui-enhancement-utils"
-description = "A curated set of ComfyUI enhancements built on the V3 API with full subgraph support: real-time resource monitor (CPU/RAM/GPU/VRAM/temp), node execution profiler with per-node timing badges, graph auto-layout (Quick/Dagre/ELK), node navigation with Follow Execution, Play Sound, System Notification, Execution Gate (lazy conditional pass-through), and an image loader with recursive subfolder scanning, custom-folder loading, and metadata extraction. A modern, well-organized alternative to ComfyUI-Custom-Scripts and Crystools."
-version = "1.8.0"
+description = "Quality-of-life tools for ComfyUI, built on the V3 API with full subgraph and Nodes 2.0 support: a Flow Visualizer that shows how data flows through a workflow and replays the last run (what ran, was cached, skipped, failed, or changed since), a resource monitor (CPU/RAM/GPU/VRAM/temp/power with history graphs), per-node timing badges, node search with jump-to-node and Follow Execution, graph auto-arrange (Quick/dagre/ELK), and handy nodes: Profiler Timing, Load Image (With Subfolders), Parse JSON, Execution Gate, Play Sound and System Notification. A modern alternative to ComfyUI-Custom-Scripts and Crystools."
+version = "1.9.0"
 keywords = [
     "ComfyUI",
     "ComfyUI-Custom-Scripts",
     "Crystools",
+    "subgraph",
+    "Nodes 2.0",
+    "flow visualizer",
+    "data flow",
+    "workflow visualization",
+    "execution order",
+    "last run",
+    "replay",
+    "changed since last run",
+    "switch",
+    "lazy inputs",
+    "Set/Get nodes",
+    "Use Everywhere",
     "resource monitor",
     "CPU monitor",
     "GPU monitor",
@@ -17,26 +30,30 @@ keywords = [
     "profiler timing",
     "execution time",
     "benchmark",
-    "graph arrange",
-    "graph layout",
-    "ELK",
-    "dagre",
+    "node search",
+    "go to node",
+    "find node",
     "node navigation",
     "follow execution",
-    "subgraph",
+    "graph arrange",
+    "graph layout",
+    "auto layout",
+    "ELK",
+    "dagre",
     "image loader",
-    "custom folder",
-    "folder loader",
     "load image from folder",
+    "subfolders",
+    "custom folder",
+    "image metadata",
     "mask editor",
-    "play sound",
-    "system notification",
     "parse json",
     "json",
     "execution gate",
     "conditional execution",
     "execution blocker",
     "control bridge",
+    "play sound",
+    "system notification",
     "utilities",
     "enhancement",
 ]
@@ -48,6 +65,9 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/phazei/ComfyUI-Enhancement-Utils"
+Documentation = "https://github.com/phazei/ComfyUI-Enhancement-Utils#readme"
+"Bug Tracker" = "https://github.com/phazei/ComfyUI-Enhancement-Utils/issues"
+Funding = "https://ko-fi.com/phazei"
 
 [tool.comfy]
 PublisherId = "phazei"
