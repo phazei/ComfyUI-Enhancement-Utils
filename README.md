@@ -74,8 +74,7 @@ https://github.com/user-attachments/assets/d69b8faf-c642-4e33-8100-8a6a7535331e
 
 **Flow visualization > Show last run** shows what really happened in the last run, and plays it back step by step.
 
-
-https://github.com/user-attachments/assets/becff86d-d7c6-4931-9ea2-d0dc38adff0c
+https://github.com/user-attachments/assets/1dd604bc-3aee-423a-ac0f-2da600f32377
 
 
 **What did I change since the last run?** Nodes you've edited get a **Δ**. Hover it to see exactly what changed -- handy when you've been tweaking and forgot what you touched.
