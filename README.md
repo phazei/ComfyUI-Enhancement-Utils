@@ -61,9 +61,9 @@ Live system stats as coloured bars in the menu bar.
 
 An overlay that shows the order data flows through a workflow, so you can understand a graph without tracing noodles.
 
-<a href="docs/videos/flow_visualizer.mp4"><img src="docs/images/flow_visualizer.webp" width="700" alt="Flow Visualizer animation: pulses travelling through a workflow"></a>
 
-<sub>Click for the full-quality video.</sub>
+https://github.com/user-attachments/assets/d69b8faf-c642-4e33-8100-8a6a7535331e
+
 
 - Nodes and links are coloured by step, from red (start) to violet (end), and pulses travel along the links.
 - Greys out what won't run, and marks switches and the nodes that depend on them.
@@ -74,9 +74,9 @@ An overlay that shows the order data flows through a workflow, so you can unders
 
 **Flow visualization > Show last run** shows what really happened in the last run, and plays it back step by step.
 
-<a href="docs/videos/flow_last_run_replay.mp4"><img src="docs/images/flow_last_run_replay.webp" width="600" alt="Show last run: replaying and scrubbing through a run"></a>
 
-<sub>Click for the full-quality video.</sub>
+https://github.com/user-attachments/assets/becff86d-d7c6-4931-9ea2-d0dc38adff0c
+
 
 **What did I change since the last run?** Nodes you've edited get a **Δ**. Hover it to see exactly what changed -- handy when you've been tweaking and forgot what you touched.
 
