@@ -7,7 +7,7 @@ import { MockGraph, mk } from "./workflowLoader.mjs";
 const { buildFlowModel, linkKey } = await import(new URL("../js/flowGraph.js", import.meta.url).href);
 const {
     normalizeRun, createLiveRun, applyNodeState, computeRunView, nodeChangedSinceRun, nodeChangeReason, nodeChangeReasons, describeValueChange, isPromptLink,
-    buildReplayTimeline, replayEventAt, replayStatusAt, aggregateStatus,
+    buildReplayTimeline, replayEventAt, replayStatusAt, aggregateStatus, replaySteps, replayStepAt, replayStepTarget, replayBrackets,
 } = await import(new URL("../js/flowRun.js", import.meta.url).href);
 
 // ── Test runner ──────────────────────────────────────────────────────────
@@ -290,6 +290,46 @@ test("replay timeline: edge from a never-reached source gets no pulse", () => {
     const tl = buildReplayTimeline(run, buildFlowModel(g));
     assert.deepEqual(tl.byId.get("3").segs.map((s) => s.key), [linkKey(g, la.id)]);
     assert.equal(tl.byId.has("2"), false);
+});
+
+test("replay steps: cached share one step; step at / stepping targets", () => {
+    const ev = (execId, status, t0, t1, t2) => ({ execId, status, t0, t1, t2 });
+    const timeline = {
+        events: [ev("1", "cached", 0, 0, 0.5), ev("4", "cached", 0, 0, 0.5), ev("2", "ran", 0.5, 0.75, 1.25), ev("3", "error", 1.25, 1.5, 2)],
+        duration: 2,
+    };
+    const steps = replaySteps(timeline);
+    assert.equal(steps.length, 3);
+    assert.deepEqual(steps[0].events.map((e) => e.execId), ["1", "4"]);
+    assert.equal(steps[2].status, "error");
+    assert.equal(replayStepAt(steps, 0), 0);
+    assert.equal(replayStepAt(steps, 0.6), 1);
+    assert.equal(replayStepAt(steps, 2), -1);
+    // forward: from step 0 onto the cached beat (just after 0), next hold start, then the end
+    assert.equal(replayStepTarget(steps, 2, 0, 1), 0.002);
+    assert.equal(replayStepTarget(steps, 2, 0.002, 1), 0.75);
+    assert.equal(replayStepTarget(steps, 2, 0.75, 1), 1.5);
+    assert.equal(replayStepTarget(steps, 2, 1.5, 1), 2);
+    // backward: inside a hold -> its own start; at a start -> previous; first -> 0
+    assert.equal(replayStepTarget(steps, 2, 1.9, -1), 1.5);
+    assert.equal(replayStepTarget(steps, 2, 1.5, -1), 0.75);
+    assert.equal(replayStepTarget(steps, 2, 0.75, -1), 0.002);
+    assert.equal(replayStepTarget(steps, 2, 0.002, -1), 0);
+    assert.equal(replayStepTarget(steps, 2, 0, -1), 0);
+    assert.equal(replaySteps(null).length, 0);
+});
+
+test("replay brackets: consecutive steps per subgraph, per level, interleaving splits", () => {
+    const ev = (execId, status, t0, t2) => ({ execId, status, t0, t1: t0, t2 });
+    const steps = replaySteps({ events: [
+        ev("1", "cached", 0, 1), ev("5:2", "cached", 0, 1),
+        ev("5:3", "ran", 1, 2), ev("5:7:1", "ran", 2, 3), ev("5:7:2", "ran", 3, 4),
+        ev("9", "ran", 4, 5), ev("5:4", "ran", 5, 6), ev("8:1", "ran", 6, 7),
+    ] });
+    const b = replayBrackets(steps).map((x) => `${x.level}:${x.execId}:${x.t0}-${x.t2}`);
+    assert.deepEqual(b, ["1:5:1-4", "1:5:5-6", "1:8:6-7", "2:5:7:2-4"]);
+    assert.equal(replayBrackets(steps, 1).length, 3);
+    assert.deepEqual(replayBrackets(null), []);
 });
 
 test("malformed input never throws", () => {

@@ -46,9 +46,10 @@
  * `enhutils.profiler.node_state` events; logic in `flowRun.js`): ran nodes
  * keep their colours, skipped / blocked / not-reached ones are greyed (and
  * the links that fed only them), cached / blocked / failed / changed-since
- * nodes get a badge, and the ambient waves stop. "Replay last run" animates
- * the run in its real order: pulses travel into each node, then a running
- * ring holds on it for a time scaled by its real duration. Both go through
+ * nodes get a badge, and the ambient waves stop. A replay bar (parked at the
+ * end) animates the run in its real order: pulses travel into each node, then a running
+ * ring holds on it for a time scaled by its real duration; a floating bar at
+ * the bottom plays / pauses it and scrubs through it. Both go through
  * `registerFlowStateProvider(fn)`, which other features can use too.
  */
 
@@ -59,7 +60,7 @@ import { findNodeByExecutionId, focusNode } from "./utils.js";
 import { registerCanvasMenuSection } from "./canvasMenu.js";
 import {
     normalizeRun, createLiveRun, applyNodeState, computeRunView, buildReplayTimeline, replayEventAt,
-    replayStatusAt, aggregateStatus,
+    replayStatusAt, aggregateStatus, replaySteps, replayStepAt, replayStepTarget, replayBrackets,
 } from "./flowRun.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,8 +149,6 @@ const GATE_HINT_MAX = 3;
 /** Max characters of one gate title in the hint. */
 const GATE_TITLE_MAX = 40;
 
-/** Replay: how long the finished picture holds before the replay ends (s). */
-const REPLAY_HOLD_S = 1.5;
 /** How long a "nothing to replay" style notice stays up (ms). */
 const NOTICE_MS = 3000;
 /** How often the run view re-checks for nodes changed since the run (ms). */
@@ -266,7 +265,7 @@ const state = {
     frame: 0,
     consecutiveErrors: 0,
 
-    hintAnchor: { x: 12, y: 12, time: 0 },
+    hintAnchor: { x: 12, y: 12, w: 0, time: 0 },
 
     /** Bumped by every settings change (invalidates the static layer). */
     configVersion: 0,
@@ -308,14 +307,18 @@ const lastRun = {
     /** performance.now() of the last computeRunView. */
     viewTime: 0,
     /**
-     * Replay in progress: { pending, timeline, start, eventIndex } or null.
-     * `pending` = waiting for a fetch / the model to build the timeline.
+     * Open replay or null: { pending, timeline, steps, promptId, eventIndex, time, playing, clock }.
+     * `pending` = waiting for a fetch / the model to build the timeline. `time` is the
+     * replay position (s); while `playing` it is `(performance.now() - clock) / 1000`.
+     * It stays open (paused at the end) until closed.
      */
     replay: null,
     /** Replay time (s) of the current frame. */
     replayTime: 0,
     /** Transient notice { text, until } or null. */
     notice: null,
+    /** Root graph id the last run was shown on (switching workflows hides it). */
+    graphId: null,
 };
 
 /** Cached sampled link / ghost geometry: key -> geometry entry. */
@@ -612,7 +615,7 @@ function lastRunProvider(execId) {
     if (!runViewActive()) return null;
     const statuses = lastRun.view.statuses;
     const replay = lastRun.replay;
-    if (replay?.timeline) {
+    if (replayAnimating()) {
         const status = replayStatusAt(replay.timeline, statuses, execId, lastRun.replayTime);
         return status ? { status } : null;
     }
@@ -635,6 +638,22 @@ function finalRunStatus(execId) {
 }
 
 /**
+ * Final (not replay-time) run status of a node / container's exec ids.
+ *
+ * @param {Array<string>} execIds - Exec ids.
+ * @returns {string|null} Aggregated status.
+ */
+function finalStatusOf(execIds) {
+    if (!runViewActive() || !execIds?.length) return null;
+    const list = [];
+    for (const id of execIds) {
+        const s = finalRunStatus(id);
+        if (s) list.push(s);
+    }
+    return list.length ? aggregateStatus(list) : null;
+}
+
+/**
  * Whether a link / ghost carried nothing in the last run: every node it
  * feeds was skipped, blocked or not reached.
  *
@@ -652,70 +671,219 @@ function linkIdleInRun(info) {
 }
 
 /**
- * Show / hide the last run. Showing turns the overlay on.
+ * A fresh replay state (no timeline yet).
+ *
+ * @returns {Object} Replay state.
+ */
+function newReplay() {
+    return {
+        timeline: null, steps: [], brackets: [], builtKey: "", eventIndex: -1,
+        time: 0, playing: false, clock: 0, unavailable: "",
+    };
+}
+
+/**
+ * Show / hide the last run. Showing turns the overlay on and opens the replay
+ * bar at step 0 (the finished picture); hiding turns the overlay off
+ * altogether.
  *
  * @param {boolean} on - Show.
  * @returns {void}
  */
 function showLastRun(on) {
-    lastRun.show = !!on;
     if (!on) {
-        lastRun.replay = null;
+        if (lastRun.show) setMode("off");
         return;
     }
     if (state.mode === "off") setMode("on");
     lastRun.show = true;
+    lastRun.graphId = app.graph?.id ?? null;
+    lastRun.replay = newReplay();
+    lastRun.replayTime = 0;
     fetchLastRun();
 }
 
 /**
- * Replay the last run: show it, fetch the latest record, then animate it in
- * real execution order (the timeline is built in the next frame that has
- * both the record and the model).
+ * Flow-visualization toggle (menu "Show" / "Hide", command). While the last
+ * run is shown it switches to the plain visualization instead of hiding.
  *
  * @returns {void}
  */
-function replayLastRun() {
-    showLastRun(true);
-    lastRun.replay = { pending: true, timeline: null, start: 0, eventIndex: -1 };
-    lastRun.replayTime = 0;
+function toggleFlow() {
+    if (lastRun.show) {
+        lastRun.show = false;
+        lastRun.replay = null;
+        lastRun.replayTime = 0;
+        if (state.mode === "off") setMode("on");
+        return;
+    }
+    toggleMode();
 }
 
 /**
- * Advance the replay clock; builds the timeline once possible and ends the
- * replay after its hold time.
+ * Why the replay can't be used right now ("" when it can).
  *
- * @param {number} now - Frame timestamp (ms).
+ * @param {Object} model - Flow model.
+ * @returns {string} Reason shown in the (dimmed) bar.
+ */
+function replayUnavailableReason(model) {
+    const run = lastRun.run;
+    if (!run) {
+        return lastRun.fetching ? "Loading the last run..." :
+            lastRun.unavailable ? "Last run unavailable (profiler endpoint not reachable)" : "Nothing has run yet";
+    }
+    if (run.status === "running") return "Running... the replay is available when the run finishes";
+    const view = getRunView(model);
+    if (!view) return "Loading the last run...";
+    if (view.foreign) return "The last run was a different workflow";
+    return "";
+}
+
+/**
+ * Advance the replay. (Re)builds the timeline whenever a finished run arrives
+ * -- parked at step 0 (time 0, the finished picture); while a run is
+ * live (or there is nothing usable) the bar is disabled. Playback stops at
+ * the end and stays there.
+ *
  * @param {Object} model - Flow model.
  * @returns {void}
  */
-function updateReplay(now, model) {
+function updateReplay(model) {
     const replay = lastRun.replay;
     if (!replay) return;
-    if (replay.pending) {
-        if (lastRun.fetching) return;
-        const view = getRunView(model);
-        if (!lastRun.run || !view || view.foreign) {
-            lastRun.replay = null;
-            setNotice(!lastRun.run ? "Flow: no run to replay yet" : "Flow: the last run was a different workflow");
-            return;
-        }
-        const timeline = buildReplayTimeline(lastRun.run, model, {
+    const reason = replayUnavailableReason(model);
+    if (reason) {
+        replay.unavailable = reason;
+        replay.timeline = null;
+        replay.steps = [];
+        replay.brackets = [];
+        replay.builtKey = "";
+        replay.playing = false;
+        replay.eventIndex = -1;
+        lastRun.replayTime = 0;
+        return;
+    }
+    const run = lastRun.run;
+    const key = `${run.promptId}|${run.status}|${run.nodes?.size ?? 0}`;
+    if (key !== replay.builtKey) {
+        replay.builtKey = key;
+        const timeline = buildReplayTimeline(run, model, {
             maxDuration: config.replayDuration,
             minNodeMs: config.replayMinNodeMs,
         });
-        if (!timeline.events.length) {
-            lastRun.replay = null;
-            setNotice("Flow: nothing to replay (no node of this workflow ran)");
-            return;
-        }
-        replay.pending = false;
         replay.timeline = timeline;
-        replay.start = now;
+        replay.steps = replaySteps(timeline);
+        replay.brackets = replayBrackets(replay.steps, REPLAY_BRACKET_LEVELS);
+        replay.time = 0; // step 0: the finished picture, handle at the start
+        replay.playing = false;
+        replay.clock = performance.now() - replay.time * 1000;
     }
-    lastRun.replayTime = (now - replay.start) / 1000;
-    replay.eventIndex = replayEventAt(replay.timeline, lastRun.replayTime);
-    if (lastRun.replayTime > replay.timeline.duration + REPLAY_HOLD_S) lastRun.replay = null;
+    if (!replay.timeline.events.length) {
+        replay.unavailable = "Nothing to replay -- no node of this workflow ran";
+        replay.playing = false;
+        lastRun.replayTime = 0;
+        return;
+    }
+    replay.unavailable = "";
+    if (replay.playing) {
+        replay.time = (performance.now() - replay.clock) / 1000;
+        if (replay.time >= replay.timeline.duration) {
+            replay.time = replay.timeline.duration;
+            replay.playing = false;
+        }
+    }
+    lastRun.replayTime = replay.time;
+    replay.eventIndex = replayEventAt(replay.timeline, replay.time);
+}
+
+/**
+ * Whether the replay is between its ends (step 0 and the end both show the
+ * finished run, like the plain run view).
+ *
+ * @returns {boolean} True while statuses follow the replay time.
+ */
+function replayAnimating() {
+    const replay = lastRun.replay;
+    return replayUsable() && replay.time > 0 && replay.time < replay.timeline.duration;
+}
+
+/**
+ * Whether the replay can be played / scrubbed now.
+ *
+ * @returns {boolean} True when a non-empty timeline is built.
+ */
+function replayUsable() {
+    return !!lastRun.replay?.timeline?.events.length && !lastRun.replay.unavailable;
+}
+/**
+ * Play / pause the replay. Playing from the end starts over.
+ *
+ * @param {boolean} [play] - Play (default: toggle).
+ * @returns {void}
+ */
+function setReplayPlaying(play) {
+    const replay = lastRun.replay;
+    if (!replayUsable()) return;
+    const on = play ?? !replay.playing;
+    if (on && replay.time >= replay.timeline.duration - 1e-3) replay.time = 0;
+    replay.playing = on;
+    replay.clock = performance.now() - replay.time * 1000;
+}
+
+/**
+ * Move the replay to time `t` (clamped); keeps playing if it was.
+ *
+ * @param {number} t - Replay time (s).
+ * @returns {void}
+ */
+function seekReplay(t) {
+    const replay = lastRun.replay;
+    if (!replayUsable() || !Number.isFinite(t)) return;
+    replay.time = Math.min(replay.timeline.duration, Math.max(0, t));
+    replay.clock = performance.now() - replay.time * 1000;
+    lastRun.replayTime = replay.time;
+    replay.eventIndex = replayEventAt(replay.timeline, replay.time);
+}
+
+/**
+ * Pause and jump to the next / previous step.
+ *
+ * @param {number} dir - +1 forward, -1 backward.
+ * @returns {void}
+ */
+function stepReplay(dir) {
+    const replay = lastRun.replay;
+    if (!replayUsable()) return;
+    replay.playing = false;
+    seekReplay(replayStepTarget(replay.steps, replay.timeline.duration, replay.time, dir));
+}
+
+/**
+ * Text for the replay bar: the step at the current time.
+ *
+ * @param {Object|null} model - Flow model.
+ * @returns {{label: string, count: string}} Step description and "k / N".
+ */
+function replayStepText(model) {
+    const replay = lastRun.replay;
+    if (!replayUsable()) return { label: replay?.unavailable || "Loading the last run...", count: "" };
+    const steps = replay.steps;
+    const total = steps.length;
+    const i = replayAnimating() ? replayStepAt(steps, replay.time) : -1;
+    if (i < 0) {
+        // Both ends show the finished run (step 0 and after the last step).
+        return { label: `Last run -- ${total} step${total === 1 ? "" : "s"}`, count: `${replay.time <= 0 ? 0 : total} / ${total}` };
+    }
+    const step = steps[i];
+    const count = `${i + 1} / ${total}`;
+    if (step.status === "cached") {
+        const n = step.events.length;
+        return { label: `${n} cached node${n === 1 ? "" : "s"} (output reused)`, count };
+    }
+    const ev = step.events[0];
+    const node = model?.nodes?.get(ev.execId)?.node;
+    const title = node ? formatNodeTitle(node) : ev.execId;
+    return { label: `${title} (#${ev.execId}) -- ${ev.status} ${formatSeconds(ev.time)}`, count };
 }
 
 /**
@@ -764,33 +932,9 @@ function pushRunHints(model, out) {
     if (!lastRun.show) return;
     const run = lastRun.run;
     const view = lastRun.view;
-    if (!run) {
-        out.push(lastRun.fetching ? "Last run: loading..." :
-            lastRun.unavailable ? "Last run: unavailable (profiler endpoint not reachable)" : "Last run: nothing has run yet");
-        return;
-    }
-    if (view?.foreign) {
-        out.push("Last run: from a different workflow");
-        return;
-    }
-    const replay = lastRun.replay;
-    if (replay?.timeline) {
-        const events = replay.timeline.events;
-        const ev = events[replay.eventIndex];
-        const cachedCount = replay.timeline.cachedCount ?? 0;
-        // The cached nodes share one beat and count as one step.
-        const total = events.length - cachedCount + (cachedCount ? 1 : 0);
-        if (ev?.status === "cached") {
-            out.push(`Replay 1/${total}: ${cachedCount} cached node${cachedCount === 1 ? "" : "s"} (output reused)`);
-        } else if (ev) {
-            const n = model.nodes?.get(ev.execId)?.node;
-            const title = n ? formatNodeTitle(n) : ev.execId;
-            const step = replay.eventIndex - cachedCount + (cachedCount ? 2 : 1);
-            out.push(`Replay ${step}/${total}: ${title} (#${ev.execId}) -- ${ev.status} ${formatSeconds(ev.time)}`);
-        } else {
-            out.push(`Replay: done (${events.length} nodes)`);
-        }
-    }
+    // No run / another workflow's run: the (disabled) replay bar says so.
+    if (!run || view?.foreign) return;
+    // The replay's current step is shown in the replay bar.
     const counts = view?.counts ?? {};
     const parts = [];
     for (const [key, label] of SUMMARY_PARTS) {
@@ -1586,11 +1730,13 @@ function updateTrace(model, graph) {
     if (selected.length) {
         for (const node of selected) key += `${node.id},`;
     } else {
-        const runNode = state.runTraceId ? resolveRunNode(state.runTraceId) : null;
+        // Replay playhead on a node: trace it like the live running node.
+        const runId = replayTraceId() ?? state.runTraceId;
+        const runNode = runId ? resolveRunNode(runId) : null;
         if (runNode?.graph) {
             traceGraph = runNode.graph;
             nodes = [runNode];
-            key += `run:${state.runTraceId}`;
+            key += `run:${runId}`;
         }
     }
     if (key === state.traceKey && graph === state.traceGraph) return;
@@ -1607,6 +1753,19 @@ function updateTrace(model, graph) {
     }
     state.gate = collectGateTrace(model, traceGraph, nodes);
     state.gateHint = state.gate ? formatGateHint(state.gate.gates) : "";
+}
+
+/**
+ * Exec id of the node the replay playhead is on, or null (no replay running,
+ * at either end, or on the shared cached step).
+ *
+ * @returns {string|null} Exec id, or null.
+ */
+function replayTraceId() {
+    const replay = lastRun.replay;
+    if (!lastRun.show || !replay?.steps || !replayAnimating()) return null;
+    const step = replay.steps[replayStepAt(replay.steps, replay.time)];
+    return step && step.status !== "cached" ? step.events[0]?.execId ?? null : null;
 }
 
 // ── Running Node ──────────────────────────────────────────────────────────
@@ -1981,6 +2140,7 @@ function updateHintAnchor(now, cssW, cssH) {
     anchor.time = now;
     anchor.x = cssW / 2;
     anchor.y = cssH - 12;
+    anchor.w = cssW;
     try {
         const panel = document.querySelector(".graph-canvas-panel");
         if (panel && state.overlay) {
@@ -1988,6 +2148,7 @@ function updateHintAnchor(now, cssW, cssH) {
             const or = state.overlay.getBoundingClientRect();
             if (pr.width > 40 && pr.height > 40) {
                 anchor.x = pr.left - or.left + pr.width / 2;
+                anchor.w = pr.width;
                 anchor.y = Math.min(cssH - 4, pr.bottom - or.top - 12);
             }
         }
@@ -2018,7 +2179,8 @@ function drawHints(ctx, dpr, hints, now, cssW, cssH) {
     ctx.font = "12px sans-serif";
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
-    let y = anchor.y;
+    // Stack above the replay bar when it is up.
+    let y = anchor.y - (replayBar.el?.isConnected ? replayBar.height + REPLAY_BAR_GAP : 0);
     for (let i = hints.length - 1; i >= 0; i--) {
         const text = hints[i];
         const w = ctx.measureText(text).width + 16;
@@ -2032,6 +2194,489 @@ function drawHints(ctx, dpr, hints, now, cssW, cssH) {
         ctx.fillText(text, x + 8, y - h / 2);
         y -= h + 4;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Replay Bar
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Floating controls at the bottom of the canvas while a replay is open:
+// play / pause, the current step (click = go to the node), a timeline track
+// (one segment per step, coloured like its node; drag or click to scrub) and
+// close. Keys while it has focus: Space play/pause, Left/Right step,
+// Home/End, Esc close. It sits in the canvas container (above the overlay)
+// at the hint anchor; the hints stack above it.
+
+/** Gap between the bar and the hints above it (px). */
+const REPLAY_BAR_GAP = 8;
+/** Max bar width (px). */
+const REPLAY_BAR_MAX_W = 620;
+/** Track height without subgraph brackets (CSS px). */
+const REPLAY_TRACK_H = 18;
+/** Subgraph nesting levels bracketed under the track. */
+const REPLAY_BRACKET_LEVELS = 2;
+/** Height of one bracket row under the track (CSS px). */
+const REPLAY_BRACKET_ROW = 5;
+/** Horizontal room for the playhead knob at both ends of the track (CSS px). */
+const REPLAY_TRACK_PAD = 6;
+
+/** Bar elements and drag state (el null until first shown). */
+const replayBar = {
+    /** @type {HTMLDivElement|null} */
+    el: null,
+    playBtn: null,
+    playIcon: null,
+    label: null,
+    count: null,
+    /** @type {HTMLCanvasElement|null} */
+    track: null,
+    /** Height of the bar when last laid out (px), for stacking the hints. */
+    height: 0,
+    /** What the track was last drawn for. */
+    drawKey: "",
+    dragging: false,
+    wasPlaying: false,
+    /** Exec id of the step in the label (click target). */
+    labelId: null,
+    /** Subgraph bracket under the cursor, or null. */
+    hoverBracket: null,
+    /** Middle column (label + track), dimmed when disabled. */
+    mid: null,
+    /** Bar is dimmed / inert (live run, nothing to replay). */
+    disabled: null,
+};
+
+/**
+ * Small icon button for the bar.
+ *
+ * @param {string} icon - PrimeIcons class (e.g. "pi-play").
+ * @param {string} title - Tooltip.
+ * @param {Function} onClick - Click handler.
+ * @returns {{btn: HTMLButtonElement, icon: HTMLElement}} Button and its icon.
+ */
+function replayButton(icon, title, onClick) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.title = title;
+    btn.tabIndex = -1;
+    Object.assign(btn.style, {
+        flex: "0 0 auto",
+        width: "30px",
+        height: "30px",
+        border: "none",
+        borderRadius: "50%",
+        background: "rgba(255,255,255,0.08)",
+        color: "#eee",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "0",
+    });
+    const i = document.createElement("i");
+    i.className = `pi ${icon}`;
+    i.style.fontSize = "13px";
+    btn.appendChild(i);
+    btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onClick();
+        replayBar.el?.focus({ preventScroll: true });
+    });
+    return { btn, icon: i };
+}
+
+/**
+ * Replay time under a client x on the track.
+ *
+ * @param {number} clientX - Pointer x.
+ * @returns {number} Replay time (s).
+ */
+function trackTimeAt(clientX) {
+    const replay = lastRun.replay;
+    const r = replayBar.track?.getBoundingClientRect();
+    const span = (r?.width ?? 0) - REPLAY_TRACK_PAD * 2;
+    if (!replay?.timeline || span <= 0) return 0;
+    return ((clientX - r.left - REPLAY_TRACK_PAD) / span) * replay.timeline.duration;
+}
+
+/**
+ * Bracket rows drawn under the track (0 when the run has no subgraph steps).
+ *
+ * @param {Object} replay - Open replay.
+ * @returns {number} Rows.
+ */
+function bracketRows(replay) {
+    let rows = 0;
+    for (const b of replay?.brackets ?? []) rows = Math.max(rows, b.level);
+    return rows;
+}
+
+/**
+ * Subgraph bracket under a client point (the band below the segments), or null.
+ *
+ * @param {number} clientX - Pointer x.
+ * @param {number} clientY - Pointer y.
+ * @returns {Object|null} Bracket.
+ */
+function bracketAt(clientX, clientY) {
+    const replay = lastRun.replay;
+    const rows = bracketRows(replay);
+    const r = replayBar.track?.getBoundingClientRect();
+    if (!rows || !r) return null;
+    const y = clientY - r.top;
+    if (y < REPLAY_TRACK_H - 3) return null;
+    const level = Math.min(rows, Math.max(1, Math.floor((y - REPLAY_TRACK_H) / REPLAY_BRACKET_ROW) + 1));
+    const t = trackTimeAt(clientX);
+    return replay.brackets.find((b) => b.level === level && t >= b.t0 && t < b.t2) ?? null;
+}
+
+/**
+ * Tooltip text of a subgraph bracket: container path and step range.
+ *
+ * @param {Object} bracket - Bracket (from replayBrackets).
+ * @returns {string} Text.
+ */
+function bracketText(bracket) {
+    const parts = bracket.execId.split(":");
+    const names = parts.map((_, i) => {
+        const id = parts.slice(0, i + 1).join(":");
+        const node = findNodeByExecutionId(id);
+        return node ? String(node.title ?? node.type ?? id) : id;
+    });
+    const steps = bracket.first === bracket.last ? `step ${bracket.first + 1}` : `steps ${bracket.first + 1}–${bracket.last + 1}`;
+    return `Subgraph: ${names.join(" › ")} (#${bracket.execId})\n${steps}`;
+}
+
+/**
+ * Create the bar (once).
+ *
+ * @returns {HTMLDivElement} Bar element.
+ */
+function createReplayBar() {
+    const el = document.createElement("div");
+    el.className = "enhutils-flow-replay";
+    el.tabIndex = 0;
+    Object.assign(el.style, {
+        position: "absolute",
+        zIndex: "5",
+        display: "flex",
+        alignItems: "center",
+        gap: "10px",
+        padding: "6px 8px",
+        borderRadius: "10px",
+        background: "rgba(20,20,20,0.88)",
+        boxShadow: "0 2px 10px rgba(0,0,0,0.5)",
+        color: "#eee",
+        font: "12px sans-serif",
+        pointerEvents: "auto",
+        outline: "none",
+        transform: "translateX(-50%)",
+        boxSizing: "border-box",
+        userSelect: "none",
+    });
+
+    const play = replayButton("pi-play", "Play / pause (Space)", () => setReplayPlaying());
+    replayBar.playBtn = play.btn;
+    replayBar.playIcon = play.icon;
+
+    const mid = document.createElement("div");
+    Object.assign(mid.style, { flex: "1 1 auto", minWidth: "0", display: "flex", flexDirection: "column", gap: "4px" });
+    const row = document.createElement("div");
+    // Fixed line box: emoji in node titles have taller glyphs and would make the bar jiggle.
+    Object.assign(row.style, { display: "flex", gap: "8px", alignItems: "center", minWidth: "0", height: "16px", lineHeight: "16px", overflow: "hidden" });
+    const label = document.createElement("span");
+    Object.assign(label.style, { flex: "1 1 auto", minWidth: "0", height: "16px", lineHeight: "16px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+    label.title = "Go to this node";
+    label.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = replayBar.labelId;
+        if (id) focusNode(findNodeByExecutionId(id));
+    });
+    const count = document.createElement("span");
+    Object.assign(count.style, { flex: "0 0 auto", opacity: "0.6", fontVariantNumeric: "tabular-nums" });
+    row.append(label, count);
+
+    const track = document.createElement("canvas");
+    track.title = "Drag to scrub; Left / Right = previous / next step";
+    Object.assign(track.style, { width: "100%", height: `${REPLAY_TRACK_H}px`, cursor: "pointer", display: "block", touchAction: "none" });
+    track.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        e.preventDefault();
+        el.focus({ preventScroll: true });
+        const replay = lastRun.replay;
+        if (!replay?.timeline) return;
+        try {
+            track.setPointerCapture(e.pointerId);
+        } catch {
+            // ignore
+        }
+        replayBar.dragging = true;
+        replayBar.wasPlaying = replay.playing;
+        replay.playing = false;
+        seekReplay(trackTimeAt(e.clientX));
+    });
+    track.addEventListener("pointermove", (e) => {
+        if (replayBar.dragging) seekReplay(trackTimeAt(e.clientX));
+        replayBar.hoverBracket = replayBar.dragging ? null : bracketAt(e.clientX, e.clientY);
+    });
+    track.addEventListener("pointerleave", () => {
+        replayBar.hoverBracket = null;
+    });
+    const endDrag = () => {
+        if (!replayBar.dragging) return;
+        replayBar.dragging = false;
+        const replay = lastRun.replay;
+        if (replayBar.wasPlaying && replay?.timeline && replay.time < replay.timeline.duration) setReplayPlaying(true);
+    };
+    track.addEventListener("pointerup", endDrag);
+    track.addEventListener("pointercancel", endDrag);
+    track.addEventListener("lostpointercapture", endDrag);
+    mid.append(row, track);
+
+    const close = replayButton("pi-times", "Close the last run (Esc)", () => showLastRun(false));
+
+    el.append(play.btn, mid, close.btn);
+    // Keep the canvas from reacting to clicks / wheel on the bar.
+    for (const type of ["pointerdown", "mousedown", "wheel", "contextmenu", "dblclick"]) {
+        el.addEventListener(type, (e) => e.stopPropagation());
+    }
+    el.addEventListener("keydown", onReplayKey);
+
+    replayBar.el = el;
+    replayBar.label = label;
+    replayBar.mid = mid;
+    replayBar.count = count;
+    replayBar.track = track;
+    return el;
+}
+
+/**
+ * Leave the viewed subgraph (one level up), like ComfyUI's Esc.
+ *
+ * @returns {boolean} True when a subgraph was open (and was left).
+ */
+function exitSubgraph() {
+    const canvas = app.canvas;
+    const graph = canvas?.graph;
+    if (!graph || graph === app.graph) return false;
+    try {
+        const run = app.extensionManager?.command?.execute;
+        if (typeof run === "function") {
+            Promise.resolve(run.call(app.extensionManager.command, "Comfy.Graph.ExitSubgraph")).catch((err) =>
+                warnOnce("failed to exit the subgraph", err));
+        } else {
+            canvas.setGraph(graph.rootGraph ?? app.graph);
+        }
+    } catch (err) {
+        warnOnce("failed to exit the subgraph", err);
+    }
+    return true;
+}
+
+/**
+ * Keyboard control while the bar has focus.
+ *
+ * @param {KeyboardEvent} e - Key event.
+ * @returns {void}
+ */
+function onReplayKey(e) {
+    const replay = lastRun.replay;
+    let handled = true;
+    switch (e.key) {
+        case " ":
+        case "k":
+            setReplayPlaying();
+            break;
+        case "ArrowRight":
+            stepReplay(1);
+            break;
+        case "ArrowLeft":
+            stepReplay(-1);
+            break;
+        case "Home":
+            if (replay) replay.playing = false;
+            seekReplay(0);
+            break;
+        case "End":
+            if (replay) replay.playing = false;
+            seekReplay(replay?.timeline?.duration ?? 0);
+            break;
+        case "Escape":
+            // Inside a subgraph Esc goes up a level first (ComfyUI's own Esc action).
+            if (!exitSubgraph()) showLastRun(false);
+            break;
+        default:
+            handled = false;
+    }
+    if (handled) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+}
+
+/**
+ * Colour of a step's segment on the track.
+ *
+ * @param {Object} step - Replay step.
+ * @param {Object|null} model - Flow model.
+ * @param {number} maxDepth - Model max depth.
+ * @returns {string} CSS colour.
+ */
+function stepColor(step, model, maxDepth) {
+    if (step.status === "cached") return RUN_BADGES.cached.color;
+    if (step.status === "blocked") return RUN_BADGES.blocked.color;
+    if (RUN_OUTLINE_COLORS[step.status]) return RUN_OUTLINE_COLORS[step.status];
+    const depth = model?.nodes?.get(step.events[0]?.execId)?.depth;
+    return hueColor(hueOf(depth ?? 0, maxDepth));
+}
+
+/**
+ * Draw the track: one segment per step (played ones solid, the current one
+ * taller, upcoming ones faint), subgraph brackets under it (one row per
+ * nesting level; the one at the playhead or under the cursor brighter) and
+ * the playhead.
+ *
+ * @param {Object} replay - Open replay with a timeline.
+ * @param {Object|null} model - Flow model.
+ * @returns {void}
+ */
+function drawReplayTrack(replay, model) {
+    const track = replayBar.track;
+    const rows = bracketRows(replay);
+    const cssH = REPLAY_TRACK_H + rows * REPLAY_BRACKET_ROW;
+    const hStyle = `${cssH}px`;
+    if (track.style.height !== hStyle) track.style.height = hStyle;
+    const cssW = track.clientWidth;
+    if (!cssW) return;
+    const dpr = window.devicePixelRatio || 1;
+    const hover = replayBar.hoverBracket;
+    const key = `${cssW}|${cssH}|${dpr}|${replay.time.toFixed(4)}|${replay.steps.length}|${model?.maxDepth}|` +
+        `${replay.promptId}|${hover ? `${hover.level}:${hover.first}` : ""}`;
+    if (key === replayBar.drawKey) return;
+    replayBar.drawKey = key;
+    const w = Math.round(cssW * dpr);
+    const h = Math.round(cssH * dpr);
+    if (track.width !== w) track.width = w;
+    if (track.height !== h) track.height = h;
+    const ctx = track.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    const dur = replay.timeline.duration || 1;
+    const pad = REPLAY_TRACK_PAD;
+    const span = cssW - pad * 2;
+
+    // Subgraph brackets: a line under the steps with short ticks up at both ends.
+    for (const b of replay.brackets ?? []) {
+        const x0 = pad + (b.t0 / dur) * span + 1;
+        const x1 = pad + (b.t2 / dur) * span - 1;
+        const y = REPLAY_TRACK_H + (b.level - 1) * REPLAY_BRACKET_ROW + 1;
+        const lineW = b.level === 1 ? 2 : 1;
+        const lit = b === hover || (replay.time >= b.t0 && replay.time < b.t2);
+        ctx.globalAlpha = lit ? 0.9 : 0.4;
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(x0, y, Math.max(1, x1 - x0), lineW);
+        if (x1 - x0 > 4) {
+            ctx.fillRect(x0, y - 3, 1, 3 + lineW);
+            ctx.fillRect(x1 - 1, y - 3, 1, 3 + lineW);
+        }
+    }
+    ctx.globalAlpha = 1;
+
+    const mid = REPLAY_TRACK_H / 2;
+    ctx.fillStyle = "rgba(255,255,255,0.08)";
+    ctx.beginPath();
+    addRoundRect(ctx, pad, mid - 3, span, 6, 3);
+    ctx.fill();
+    const maxDepth = Math.max(1, Number(model?.maxDepth) || 1);
+    const cur = replayAnimating() ? replayStepAt(replay.steps, replay.time) : -1;
+    replay.steps.forEach((step, i) => {
+        const x0 = pad + (step.t0 / dur) * span;
+        const x1 = pad + (step.t2 / dur) * span;
+        const gap = x1 - x0 > 4 ? 1 : 0;
+        const tall = i === cur;
+        const sh = tall ? 10 : 6;
+        ctx.globalAlpha = tall ? 1 : step.t2 <= replay.time ? 0.85 : 0.3;
+        ctx.fillStyle = stepColor(step, model, maxDepth);
+        ctx.fillRect(x0 + gap, mid - sh / 2, Math.max(1, x1 - x0 - gap * 2), sh);
+    });
+    ctx.globalAlpha = 1;
+    const x = pad + (Math.min(dur, Math.max(0, replay.time)) / dur) * span;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(x - 1, 1, 2, REPLAY_TRACK_H - 2);
+    ctx.beginPath();
+    ctx.arc(x, mid, 5, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+/**
+ * Show / update / hide the bar for this frame. Positioned at the hint anchor
+ * (bottom-centre of the free canvas area).
+ *
+ * @param {Object|null} model - Flow model.
+ * @param {number} now - Frame timestamp (ms).
+ * @param {number} cssW - Overlay width (CSS px).
+ * @param {number} cssH - Overlay height (CSS px).
+ * @returns {void}
+ */
+function updateReplayBar(model, now, cssW, cssH) {
+    const replay = lastRun.replay;
+    const overlay = state.overlay;
+    if (!replay || !overlay?.parentElement) {
+        removeReplayBar();
+        return;
+    }
+    const el = replayBar.el ?? createReplayBar();
+    if (el.parentElement !== overlay.parentElement) overlay.parentElement.appendChild(el);
+    const anchor = updateHintAnchor(now, cssW, cssH);
+    const width = Math.max(240, Math.min(REPLAY_BAR_MAX_W, (anchor.w || cssW) - 40));
+    el.style.width = `${width}px`;
+    el.style.left = `${overlay.offsetLeft + anchor.x}px`;
+    replayBar.height = el.offsetHeight;
+    el.style.top = `${overlay.offsetTop + anchor.y - replayBar.height}px`;
+
+    // Live run / nothing usable: dimmed and inert except for close.
+    const disabled = !replayUsable();
+    if (replayBar.disabled !== disabled) {
+        replayBar.disabled = disabled;
+        for (const part of [replayBar.playBtn, replayBar.mid]) {
+            part.style.opacity = disabled ? "0.45" : "1";
+            part.style.pointerEvents = disabled ? "none" : "auto";
+        }
+        if (disabled) replayBar.dragging = false;
+    }
+    const playing = !!replay.playing;
+    const icon = playing ? "pi pi-pause" : "pi pi-play";
+    if (replayBar.playIcon.className !== icon) replayBar.playIcon.className = icon;
+    const text = replayStepText(model);
+    if (replayBar.label.textContent !== text.label) replayBar.label.textContent = text.label;
+    if (replayBar.count.textContent !== text.count) replayBar.count.textContent = text.count;
+    const step = replayAnimating() ? replay.steps[replayStepAt(replay.steps, replay.time)] : null;
+    replayBar.labelId = step && step.status !== "cached" ? step.events[0]?.execId ?? null : null;
+    replayBar.label.style.cursor = replayBar.labelId ? "pointer" : "default";
+    if (disabled) {
+        if (replayBar.drawKey !== "disabled") {
+            replayBar.drawKey = "disabled";
+            replayBar.track.style.height = `px`;
+            replayBar.track.getContext("2d")?.clearRect(0, 0, replayBar.track.width, replayBar.track.height);
+        }
+    } else {
+        drawReplayTrack(replay, model);
+    }
+}
+
+/**
+ * Detach the bar.
+ *
+ * @returns {void}
+ */
+function removeReplayBar() {
+    replayBar.dragging = false;
+    replayBar.hoverBracket = null;
+    replayBar.disabled = null;
+    replayBar.height = 0;
+    replayBar.drawKey = "";
+    replayBar.el?.remove();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2063,7 +2708,8 @@ function installPointerTracking() {
         pointer.y = e.clientY;
         pointer.buttons = e.buttons;
         const host = app.canvas?.canvas?.parentElement;
-        pointer.inside = !!host && e.target instanceof Node && host.contains(e.target);
+        pointer.inside = !!host && e.target instanceof Node && host.contains(e.target) &&
+            !replayBar.el?.contains(e.target);
     };
     window.addEventListener("pointermove", track, { capture: true, passive: true });
     window.addEventListener("pointerdown", (e) => {
@@ -2078,12 +2724,15 @@ function installPointerTracking() {
 }
 
 /**
- * Show the tooltip near the cursor.
+ * Show the tooltip above an anchor box (a node's badge row), or near the
+ * cursor without one. Anchoring keeps it clear of the cursor whatever its
+ * size (large accessibility cursors covered a below-right tooltip).
  *
  * @param {string} text - Text (newlines allowed).
+ * @param {{left: number, top: number, bottom: number}|null} [anchor] - Screen box to sit above.
  * @returns {void}
  */
-function showTooltip(text) {
+function showTooltip(text, anchor = null) {
     if (!tooltipEl) {
         tooltipEl = document.createElement("div");
         tooltipEl.className = "enhutils-flow-tooltip";
@@ -2109,11 +2758,22 @@ function showTooltip(text) {
     tooltipEl.style.display = "block";
     const w = tooltipEl.offsetWidth;
     const h = tooltipEl.offsetHeight;
-    const x = Math.min(pointer.x + 14, window.innerWidth - w - 4);
-    const y = pointer.y + 18 + h > window.innerHeight ? pointer.y - h - 8 : pointer.y + 18;
+    let x;
+    let y;
+    if (anchor) {
+        x = Math.min(anchor.left, window.innerWidth - w - 4);
+        // Above the anchor; below it only when there is no room at the top.
+        y = anchor.top - h - TOOLTIP_GAP >= 4 ? anchor.top - h - TOOLTIP_GAP : anchor.bottom + TOOLTIP_GAP;
+    } else {
+        x = Math.min(pointer.x + 14, window.innerWidth - w - 4);
+        y = pointer.y + 18 + h > window.innerHeight ? pointer.y - h - 8 : pointer.y + 18;
+    }
     tooltipEl.style.left = `${Math.max(4, x)}px`;
     tooltipEl.style.top = `${Math.max(4, y)}px`;
 }
+
+/** Gap between a badge tooltip and the node it describes (screen px). */
+const TOOLTIP_GAP = 6;
 
 /**
  * Hide the tooltip.
@@ -2121,6 +2781,7 @@ function showTooltip(text) {
  * @returns {void}
  */
 function hideTooltip() {
+    tooltipHold = null;
     if (tooltipEl && tooltipText !== "") {
         tooltipEl.style.display = "none";
         tooltipText = "";
@@ -2133,7 +2794,7 @@ const RUN_TOOLTIPS = Object.freeze({
     blocked: "Blocked -- an input carried an execution blocker, so it didn't run",
     error: "Failed",
     interrupted: "Interrupted -- the run was stopped here",
-    changed: "Changed since the run -- the run's record doesn't apply to it",
+    changed: "Changed since run",
 });
 
 /**
@@ -2200,13 +2861,20 @@ function tooltipTextFor(hit, model, graph) {
     const head = `${formatNodeTitle(node)} (#${info.kind === "container" ? node?.id : info.execIds?.[0] ?? node?.id})`;
     if (hit.kind === "run") {
         const d = runDetailsOf(info.execIds);
-        let text = RUN_TOOLTIPS[it.status] ?? it.status;
-        if (it.status === "error" && d.message) text += `: ${d.message}`;
-        if (it.status === "changed" && d.reason && info.kind !== "container") text += `\n${d.reason}`;
-        if ((it.status === "error" || it.status === "interrupted") && d.time > 0) text += `\nRan ${formatSeconds(d.time)}`;
+        const status = it.badge;
+        if (status === "changed") {
+            // The changes are the information; no explanation line.
+            if (info.kind === "container") {
+                const lines = containerChangeLines(info.execIds, model);
+                return `${head}\nChanged since run, inside subgraph${lines ? `:${lines}` : ""}`;
+            }
+            return `${head}\nChanged since run:${d.reason ? `\n${d.reason}` : " something unknown"}`;
+        }
+        let text = RUN_TOOLTIPS[status] ?? status;
+        if (status === "error" && d.message) text += `: ${d.message}`;
+        if ((status === "error" || status === "interrupted") && d.time > 0) text += `\nRan ${formatSeconds(d.time)}`;
         if (info.kind === "container") {
-            text = `Subgraph: something inside is ${it.status}\n${text}`;
-            if (it.status === "changed") text += containerChangeLines(info.execIds, model);
+            text = `Subgraph: something inside is ${status}\n${text}`;
         }
         return `${head}\n${text}`;
     }
@@ -2230,50 +2898,144 @@ function tooltipTextFor(hit, model, graph) {
     return "";
 }
 
+/** Min hover radius of a badge / lazy diamond (screen px; drawn ones are smaller). */
+const BADGE_HIT_SCREEN_PX = 12;
+/** Half-height of the band along a node's top edge that picks its nearest badge (screen px). */
+const BADGE_BAND_SCREEN_PX = 16;
+
+/** Tooltip held open while the cursor stays over its node: { node, kind, slot } or null. */
+let tooltipHold = null;
+
+/**
+ * Hover geometry shared by the hit test and the hold check.
+ *
+ * @param {number} lw - Line width (graph units).
+ * @param {number} scale - Canvas zoom.
+ * @returns {{pad: number, b: number, r: number, hitR: number, band: number}} Graph-unit sizes.
+ */
+function badgeMetrics(lw, scale) {
+    const b = markSize(BADGE_SCREEN_PX, scale);
+    return {
+        pad: lw * 0.5 + 2 / scale,
+        b,
+        r: markSize(LAZY_DIAMOND_SCREEN_PX, scale),
+        hitR: Math.max(b * 0.7, BADGE_HIT_SCREEN_PX / scale),
+        band: Math.max(b * 0.9, BADGE_BAND_SCREEN_PX / scale),
+    };
+}
+
+/**
+ * Badges a node item currently shows, at the positions drawRunMarks /
+ * drawNodeMarks use. `top` marks the ones centred on the node's top edge.
+ *
+ * @param {Object} it - Node item.
+ * @param {Object} m - badgeMetrics().
+ * @returns {Array<{kind: string, x: number, y: number, rad: number, slot?: number, top: boolean}>} Badges.
+ */
+function itemBadges(it, m) {
+    const { pad, b, r, hitR } = m;
+    const info = it.info;
+    const top = it.y - pad;
+    const out = [];
+    if (it.badge && RUN_BADGES[it.badge]) {
+        out.push({ kind: "run", x: it.x - pad + Math.max(b * 0.9, 8 + pad), y: top, rad: hitR, top: true });
+    }
+    if (!config.markLazy) return out;
+    const isHop = info.kind === "virtual" || info.kind === "bypassed";
+    const conditional = !!info.conditional && !isHop && !it.settled;
+    let cx = it.x + it.w + pad - Math.max(b * 0.9, 8 + pad);
+    if (info.isSwitch) {
+        out.push({ kind: "switch", x: cx, y: top, rad: hitR, top: true });
+        for (const slot of info.lazySlots ?? []) {
+            let p = null;
+            try {
+                p = it.node.getInputPos(slot);
+            } catch {
+                p = null;
+            }
+            if (p) out.push({ kind: "lazy", x: p[0], y: p[1], rad: Math.max(r * 1.6, hitR), slot, top: false });
+        }
+        cx -= b * 1.3;
+    }
+    if (conditional) out.push({ kind: "conditional", x: cx, y: top, rad: hitR, top: true });
+    return out;
+}
+
+/**
+ * Whether a graph point is over a node item, including the badge band above
+ * its top edge.
+ *
+ * @param {Object} it - Node item.
+ * @param {number} gx - Graph x.
+ * @param {number} gy - Graph y.
+ * @param {Object} m - badgeMetrics().
+ * @returns {boolean} Inside.
+ */
+function overItem(it, gx, gy, m) {
+    const e = m.pad + m.band;
+    return gx >= it.x - e && gx <= it.x + it.w + e && gy >= it.y - e && gy <= it.y + it.h + m.pad;
+}
+
 /**
  * Hit-test the badges of this frame's node items against a graph point.
- * Mirrors the positions used by drawRunMarks / drawNodeMarks.
+ * A badge is hit within its (enlarged) radius; failing that, a point in the
+ * band along a node's top edge picks that node's horizontally nearest top
+ * badge, so the tiny marks don't need precise aim.
  *
  * @param {number} gx - Graph x.
  * @param {number} gy - Graph y.
- * @param {number} lw - Line width (graph units).
- * @param {number} scale - Canvas zoom.
+ * @param {Object} m - badgeMetrics().
  * @returns {Object|null} { kind, item, slot } or null.
  */
-function hitTestBadges(gx, gy, lw, scale) {
-    const pad = lw * 0.5 + 2 / scale;
-    const b = markSize(BADGE_SCREEN_PX, scale);
-    const r = markSize(LAZY_DIAMOND_SCREEN_PX, scale);
-    const badgeR = b * 0.7; // a little more forgiving than the drawn radius
+function hitTestBadges(gx, gy, m) {
     const dim = state.trace ? 1 - config.dimStrength : 1;
-    const near = (x, y, rad) => (gx - x) ** 2 + (gy - y) ** 2 <= rad * rad;
+    let banded = null;
     for (let i = nodeItemCount - 1; i >= 0; i--) {
         const it = nodeItems[i];
         if (!it.node) continue;
         if (!it.inTrace && dim <= 0.001) continue;
-        const info = it.info;
-        if (it.status && RUN_BADGES[it.status]) {
-            const cx = it.x - pad + Math.max(b * 0.9, 8 + pad);
-            if (near(cx, it.y - pad, badgeR)) return { kind: "run", item: it };
-        }
-        if (!config.markLazy) continue;
-        const isHop = info.kind === "virtual" || info.kind === "bypassed";
-        const conditional = !!info.conditional && !isHop && !it.settled;
-        let cx = it.x + it.w + pad - Math.max(b * 0.9, 8 + pad);
-        if (info.isSwitch) {
-            if (near(cx, it.y - pad, badgeR)) return { kind: "switch", item: it };
-            for (const slot of info.lazySlots ?? []) {
-                let p = null;
-                try {
-                    p = it.node.getInputPos(slot);
-                } catch {
-                    p = null;
-                }
-                if (p && near(p[0], p[1], r * 1.6)) return { kind: "lazy", item: it, slot };
+        if (!overItem(it, gx, gy, m)) continue;
+        const badges = itemBadges(it, m);
+        let best = null;
+        let bestD = Infinity;
+        for (const bd of badges) {
+            const d = (gx - bd.x) ** 2 + (gy - bd.y) ** 2;
+            if (d <= bd.rad * bd.rad && d < bestD) {
+                best = bd;
+                bestD = d;
             }
-            cx -= b * 1.3;
         }
-        if (conditional && near(cx, it.y - pad, badgeR)) return { kind: "conditional", item: it };
+        if (best) return { kind: best.kind, item: it, slot: best.slot };
+        if (banded || Math.abs(gy - (it.y - m.pad)) > m.band) continue;
+        let dx = Infinity;
+        for (const bd of badges) {
+            if (bd.top && Math.abs(gx - bd.x) < dx) {
+                dx = Math.abs(gx - bd.x);
+                banded = { kind: bd.kind, item: it, slot: bd.slot };
+            }
+        }
+    }
+    return banded;
+}
+
+/**
+ * The held tooltip's hit for this frame, while the cursor is still over its
+ * node and the badge still exists.
+ *
+ * @param {number} gx - Graph x.
+ * @param {number} gy - Graph y.
+ * @param {Object} m - badgeMetrics().
+ * @returns {Object|null} { kind, item, slot } or null.
+ */
+function heldHit(gx, gy, m) {
+    const hold = tooltipHold;
+    if (!hold) return null;
+    for (let i = 0; i < nodeItemCount; i++) {
+        const it = nodeItems[i];
+        if (it.node !== hold.node) continue;
+        if (!overItem(it, gx, gy, m)) return null;
+        const still = itemBadges(it, m).some((bd) => bd.kind === hold.kind && bd.slot === hold.slot);
+        return still ? { kind: hold.kind, item: it, slot: hold.slot } : null;
     }
     return null;
 }
@@ -2292,6 +3054,11 @@ function hitTestBadges(gx, gy, lw, scale) {
  */
 function updateTooltip(model, graph, mainEl, lw, scale, ox, oy) {
     installPointerTracking();
+    const bracket = replayBar.el?.isConnected && !pointer.buttons ? replayBar.hoverBracket : null;
+    if (bracket) {
+        showTooltip(bracketText(bracket));
+        return;
+    }
     if (!pointer.inside || pointer.buttons) {
         hideTooltip();
         return;
@@ -2304,10 +3071,27 @@ function updateTooltip(model, graph, mainEl, lw, scale, ox, oy) {
         return;
     }
     // screen = (graph + offset) * scale  (DragAndScale.convertOffsetToCanvas)
-    const hit = hitTestBadges(sx / scale - ox, sy / scale - oy, lw, scale);
+    const gx = sx / scale - ox;
+    const gy = sy / scale - oy;
+    const m = badgeMetrics(lw, scale);
+    // A badge under the cursor wins; otherwise an open tooltip stays while
+    // the cursor is anywhere over its node.
+    const hit = hitTestBadges(gx, gy, m) ?? heldHit(gx, gy, m);
     const text = hit ? tooltipTextFor(hit, model, graph) : "";
-    if (text) showTooltip(text);
-    else hideTooltip();
+    if (!text) {
+        hideTooltip();
+        return;
+    }
+    const it = hit.item;
+    tooltipHold = { node: it.node, kind: hit.kind, slot: hit.slot };
+    // Anchor above the node's badge row (badges are centred on its top edge).
+    const r = m.b * 0.55;
+    const toScreenY = (y) => (y + oy) * scale + rect.top;
+    showTooltip(text, {
+        left: (it.x - m.pad + ox) * scale + rect.left,
+        top: toScreenY(it.y - m.pad - r),
+        bottom: toScreenY(it.y - m.pad + r),
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2442,7 +3226,7 @@ function nextNodeItem() {
     if (!item) {
         item = {
             node: null, info: null, x: 0, y: 0, w: 0, h: 0, inTrace: true, status: null, grey: false, gate: false,
-            running: false, settled: false, pending: false, glow: 0,
+            running: false, settled: false, pending: false, glow: 0, badge: null,
         };
         nodeItems.push(item);
     }
@@ -2646,13 +3430,15 @@ function collectNodes(graph, model) {
             item.settled = RUN_SETTLED.has(item.status);
             item.grey = info.kind === "muted" || (!info.active && !item.settled) || RUN_GREY.has(item.status) ||
                 !Number.isFinite(info.depth);
-            item.pending = item.status === "pending" && !!lastRun.replay?.timeline;
+            item.pending = item.status === "pending" && replayAnimating();
+            // Corner badge: the final run status, also while a replay hasn't reached the node yet.
+            item.badge = work && replayAnimating() ? finalStatusOf(info.execIds) : item.status;
             item.glow = !item.running && work && runAfterglow.size ? afterglowOf(info.execIds, frameNow) : 0;
             hashMix(b[0]);
             hashMix(b[1]);
             hashMix(b[2]);
             hashMix(b[3]);
-            hashMix((item.grey ? 1 : 0) + (item.inTrace ? 2 : 0) + (item.pending ? 4 : 0) + statusCode(item.status) * 8);
+            hashMix((item.grey ? 1 : 0) + (item.inTrace ? 2 : 0) + (item.pending ? 4 : 0) + statusCode(item.status) * 8 + statusCode(item.badge) * 512);
         } catch (err) {
             warnOnce("failed to read node info", err);
         }
@@ -2934,8 +3720,6 @@ function drawRunMarks(ctx, lw, scale, dim) {
     ctx.textBaseline = "middle";
     for (let i = 0; i < nodeItemCount; i++) {
         const it = nodeItems[i];
-        const badge = it.status ? RUN_BADGES[it.status] : null;
-        if (!badge) continue;
         const a = it.inTrace ? 1 : dim;
         if (a <= 0.001) continue;
         const outline = RUN_OUTLINE_COLORS[it.status];
@@ -2947,6 +3731,8 @@ function drawRunMarks(ctx, lw, scale, dim) {
             addRoundRect(ctx, it.x - pad, it.y - pad, it.w + pad * 2, it.h + pad * 2, 8 + pad);
             ctx.stroke();
         }
+        const badge = it.badge ? RUN_BADGES[it.badge] : null;
+        if (!badge) continue;
         const cx = it.x - pad + Math.max(b * 0.9, 8 + pad);
         const cy = it.y - pad;
         ctx.beginPath();
@@ -3090,7 +3876,7 @@ const replayHeads = new Map();
  */
 function drawReplayPulses(ctx, model, maxDepth, lw, scale, dpr) {
     const replay = lastRun.replay;
-    const ev = replay?.timeline?.events[replay.eventIndex];
+    const ev = replayAnimating() ? replay.timeline.events[replay.eventIndex] : null;
     if (!ev?.segs.length) return;
     const t = lastRun.replayTime;
     if (t >= ev.t1 || ev.t1 <= ev.t0) return;
@@ -3265,7 +4051,7 @@ function drawGateRings(ctx, now, maxDepth, lw, scale, dpr) {
  * @returns {void}
  */
 function drawRunRings(ctx, now, lw, scale, dpr) {
-    if (!state.runId && !lastRun.replay?.timeline && !runAfterglow.size) return;
+    if (!state.runId && !replayAnimating() && !runAfterglow.size) return;
     const p = 0.5 + 0.5 * Math.sin(now / 120);
     const pad = lw * 2.5 + 10 / scale;
     ctx.setLineDash([]);
@@ -3382,8 +4168,13 @@ function renderFrame(now) {
     }
     frameNow = now;
     pruneAfterglow(now);
+    // The last run belongs to the workflow it was opened on (undo reloads keep the id).
+    if (lastRun.show && (app.graph?.id ?? null) !== lastRun.graphId) {
+        setMode("off");
+        return;
+    }
     if (lastRun.show) getRunView(model);
-    updateReplay(now, model);
+    updateReplay(model);
     updateRunTrace(now);
     updateTrace(model, graph);
     if (checkTransientOff(graph)) return;
@@ -3394,6 +4185,7 @@ function renderFrame(now) {
     if (state.gateHint) hintLines.push(state.gateHint);
     if (model.noOutputs) hintLines.push("Flow: no output nodes -- showing all");
     pushRunHints(model, hintLines);
+    updateReplayBar(model, now, cssW, cssH);
 
     const scale = ds.scale || 1;
     const ox = ds.offset[0];
@@ -3560,6 +4352,7 @@ function stopLoop() {
     state.rebuildTimer = 0;
     removeOverlay();
     removeLinesCanvas();
+    removeReplayBar();
     hideTooltip();
     for (const st of [state.staticLines, state.staticNodes]) {
         if (st.canvas) {
@@ -3737,16 +4530,12 @@ function buildCanvasMenuItems() {
             submenu: {
                 options: [
                     {
-                        content: state.mode === "off" ? "Show" : "Hide",
-                        callback: () => toggleMode(),
+                        content: state.mode === "off" || lastRun.show ? "Show" : "Hide",
+                        callback: () => toggleFlow(),
                     },
                     {
                         content: lastRun.show ? "Hide last run" : "Show last run",
                         callback: () => showLastRun(!lastRun.show),
-                    },
-                    {
-                        content: "Replay last run",
-                        callback: () => replayLastRun(),
                     },
                     {
                         content: config.linesUnder ? "Draw lines over nodes" : "Draw lines under nodes",
@@ -3999,21 +4788,15 @@ app.registerExtension({
             id: "EnhUtils.Flow.Toggle",
             label: "Toggle flow visualization",
             icon: "pi pi-sitemap",
-            function: () => toggleMode(),
-            active: () => state.mode !== "off",
+            function: () => toggleFlow(),
+            active: () => state.mode !== "off" && !lastRun.show,
         },
         {
             id: "EnhUtils.Flow.ShowLastRun",
-            label: "Toggle flow visualization of the last run",
+            label: "Toggle last run (flow visualization)",
             icon: "pi pi-history",
             function: () => showLastRun(!lastRun.show),
             active: () => lastRun.show,
-        },
-        {
-            id: "EnhUtils.Flow.ReplayLastRun",
-            label: "Replay last run (flow visualization)",
-            icon: "pi pi-replay",
-            function: () => replayLastRun(),
         },
     ],
 

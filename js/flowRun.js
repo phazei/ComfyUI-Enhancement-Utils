@@ -908,6 +908,136 @@ export function replayEventAt(timeline, t) {
 }
 
 /**
+ * Replay steps as the user sees them: one per node, except that all cached
+ * nodes share the first step (they share one beat).
+ *
+ * @param {Object} timeline - Replay timeline.
+ * @returns {Array<{t0: number, t1: number, t2: number, events: Array<Object>, status: string}>}
+ *   Steps in time order; `t1` = start of the hold (where stepping lands).
+ */
+export function replaySteps(timeline) {
+    const steps = [];
+    let cached = null;
+    for (const ev of timeline?.events ?? []) {
+        if (ev.status === "cached") {
+            if (!cached) {
+                cached = { t0: ev.t0, t1: ev.t1, t2: ev.t2, events: [], status: "cached" };
+                steps.push(cached);
+            }
+            cached.events.push(ev);
+            continue;
+        }
+        steps.push({ t0: ev.t0, t1: ev.t1, t2: ev.t2, events: [ev], status: ev.status });
+    }
+    return steps;
+}
+
+/**
+ * Exec id of the subgraph container a node sits in at nesting `level`
+ * (1 = top-level container), or null when it isn't that deep.
+ *
+ * @param {string} execId - Node exec id ("5:12:3").
+ * @param {number} level - Nesting level (>= 1).
+ * @returns {string|null} Container exec id ("5" / "5:12").
+ */
+function containerAt(execId, level) {
+    const parts = String(execId ?? "").split(":");
+    return parts.length > level ? parts.slice(0, level).join(":") : null;
+}
+
+/**
+ * Subgraph brackets for the replay track: runs of consecutive steps inside
+ * the same subgraph container, per nesting level (1 = top-level container).
+ * A step counts as inside when all its nodes are (the shared cached step
+ * usually isn't). ComfyUI interleaves branches, so one subgraph can give
+ * several brackets.
+ *
+ * @param {Array<Object>} steps - From replaySteps.
+ * @param {number} [maxLevels=2] - Deepest level to bracket.
+ * @returns {Array<{level: number, execId: string, t0: number, t2: number, first: number, last: number}>}
+ *   Brackets in time order per level (`first` / `last` = step indices).
+ */
+export function replayBrackets(steps, maxLevels = 2) {
+    const out = [];
+    const list = steps ?? [];
+    for (let level = 1; level <= maxLevels; level++) {
+        let cur = null;
+        list.forEach((step, i) => {
+            let id = null;
+            for (const ev of step.events ?? []) {
+                const c = containerAt(ev.execId, level);
+                if (c == null || (id != null && c !== id)) {
+                    id = null;
+                    break;
+                }
+                id = c;
+            }
+            if (id != null && cur?.execId === id && cur.last === i - 1) {
+                cur.last = i;
+                cur.t2 = step.t2;
+                return;
+            }
+            cur = null;
+            if (id != null) {
+                cur = { level, execId: id, t0: step.t0, t2: step.t2, first: i, last: i };
+                out.push(cur);
+            }
+        });
+    }
+    return out;
+}
+
+/**
+ * Index of the step playing at time `t`, or -1 (before the first / at or
+ * after the end).
+ *
+ * @param {Array<Object>} steps - From replaySteps.
+ * @param {number} t - Replay time (s).
+ * @returns {number} Step index, or -1.
+ */
+export function replayStepAt(steps, t) {
+    let lo = 0;
+    let hi = (steps?.length ?? 0) - 1;
+    while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const s = steps[mid];
+        if (t < s.t0) hi = mid - 1;
+        else if (t >= s.t2) lo = mid + 1;
+        else return mid;
+    }
+    return -1;
+}
+
+/**
+ * Where stepping from time `t` lands: the hold start of the next / previous
+ * step. Backward from inside a step's hold goes to that step's start first.
+ * Past the last step forward is the end (`duration`); before the first
+ * backward is 0 (step 0).
+ *
+ * @param {Array<Object>} steps - From replaySteps.
+ * @param {number} duration - Timeline duration (s).
+ * @param {number} t - Current replay time (s).
+ * @param {number} dir - +1 forward, -1 backward.
+ * @returns {number} Target time (s).
+ */
+export function replayStepTarget(steps, duration, t, dir) {
+    const EPS = 1e-3;
+    // Time 0 is step 0 (the finished picture), so a step starting at 0 (the
+    // cached beat) is landed on just after it.
+    const land = (s) => Math.max(s.t1, 2 * EPS);
+    if (dir > 0) {
+        for (const s of steps ?? []) {
+            if (land(s) > t + EPS) return land(s);
+        }
+        return duration;
+    }
+    for (let i = (steps?.length ?? 0) - 1; i >= 0; i--) {
+        if (land(steps[i]) < t - EPS) return land(steps[i]);
+    }
+    return 0;
+}
+
+/**
  * Status of a node at replay time `t`: "pending" before its slot, "running"
  * during its work phase, its final status after. Nodes that were never
  * reached keep their run-view status throughout.
