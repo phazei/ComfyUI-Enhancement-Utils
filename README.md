@@ -1,145 +1,303 @@
 # ComfyUI Enhancement Utils
 
-A curated collection of enhancement utilities for ComfyUI, combining and improving features from several community packages into a single, well-organized package built on the V3 API (`comfy_api`).
+Quality-of-life tools for ComfyUI: a resource monitor, per-node timings, node search, a data-flow visualizer, auto-arrange, and a few handy nodes.
 
-> **Full Subgraph Support** -- Every feature in this package works inside subgraphs. Graph arrangement, node navigation, execution profiling, and running-node highlights all handle nested subgraphs correctly. None of the original packages these features were drawn from support subgraphs.
+[Like it? Buy me a coffee on Ko-fi](https://ko-fi.com/phazei) · [More nodes by phazei](#more-nodes-by-phazei)
 
-> **Nodes 2.0 Compatible** -- Every feature works in both the legacy LiteGraph canvas renderer and the new Nodes 2.0 Vue renderer. Profiling badges, graph arrangement, node navigation, resource monitoring, and all nodes function correctly in either mode.
+Everything works **inside subgraphs** and in both the **classic and Nodes 2.0** renderers. Most features have options under **Settings > EnhUtils**, each explained by its tooltip.
+
+| Feature | What it does |
+|---------|--------------|
+| [Resource Monitor](#resource-monitor) | CPU, RAM, GPU, VRAM, temperature and power bars in the menu, with history graphs |
+| [Flow Visualizer](#flow-visualizer) | Shows the order data flows through a workflow, and replays the last run |
+| [Node Profiler](#node-profiler) | Shows how long each node took |
+| [Profiler Timing](#profiler-timing) *(node)* | Node timings as numbers you can use in the workflow |
+| [Load Image (With Subfolders)](#load-image-with-subfolders) *(node)* | Load images from subfolders or any folder, with their metadata |
+| [Node Navigation](#node-navigation) | Search for any node and jump to it; follow the running node |
+| [Graph Arrange](#graph-arrange) | Auto-layout for the graph you're viewing |
+| [Play Sound](#play-sound) *(node)* | Plays a sound when the workflow reaches it |
+| [System Notification](#system-notification) *(node)* | Browser notification when the workflow reaches it |
+| [Parse JSON](#parse-json-enhutils) *(node)* | Turns JSON text into data other nodes can use |
+| [Execution Gate](#execution-gate-enhutils) *(node)* | Skips the rest of a branch when a boolean is false |
 
 ## Features
 
 ### Resource Monitor
 
-Real-time system stats displayed as horizontal colored bars in the ComfyUI menu bar.
+Live system stats as coloured bars in the menu bar.
 
-<img src="docs/images/resource_monitor.png" width="700" alt="Resource monitor bars in menu bar">
+<img src="docs/images/resource_monitor.webp" width="700" alt="Resource monitor bars in menu bar">
 
-| Metric | Color | Display |
-|--------|-------|---------|
-| **CPU** | Amber | Utilization % |
-| **RAM** | Green | Used / total (tooltip shows bytes) |
-| **Disk** | Muted purple | Usage for a selected partition |
-| **IO** | Bright purple | Disk I/O activity across all disks: % of time the busiest disk is busy (like Task Manager's Disk %); tooltip shows which disk and total read/write speeds. Off by default; enable with **Show disk I/O activity** |
-| **GPU** | Blue | Utilization % (NVIDIA only) |
-| **VRAM** | Teal | Used / total, max-used tracking in tooltip |
-| **Temp** | Green-to-red gradient | GPU temperature in degrees |
-| **Power** | Red-orange | Current wattage (bar fill = % of TDP) |
+- Hover a bar to see its recent history; click to see every graph at once.
+- Tracks this session's electricity cost (set your rate in the settings).
+- Full GPU stats on NVIDIA. AMD and Intel GPUs show VRAM only.
 
-**Historical graphs** -- hover any bar for a single-metric sparkline popup. Click any bar to pin a grid showing all metrics at once. Click again or click outside to dismiss.
+<details>
+<summary>More details</summary>
 
-**Electricity cost** -- session power consumption is tracked and displayed on the power bar tooltip and graph popup. Configure your electricity rate and currency symbol in settings.
+| Bar | Shows |
+|-----|-------|
+| **CPU** | Utilization |
+| **RAM** | Used / total |
+| **Disk** | Space used on a chosen drive |
+| **IO** | How busy the busiest disk is, like Task Manager's Disk %. Off by default (**Show disk I/O activity**) |
+| **GPU** | Utilization (NVIDIA only) |
+| **VRAM** | Used / total, with the peak in the tooltip |
+| **Temp** | GPU temperature |
+| **Power** | Current watts (bar = % of the power limit) |
 
-**History persists through browser refresh** -- data is stored server-side in memory. Choose a display window (5 / 10 / 20 / 30 min, 1 hr, or Unlimited). Right-click the monitor bars to clear history.
+- History is kept by the server, so it survives a browser refresh (not a ComfyUI restart). Pick how much to show in the settings (5 min to unlimited); right-click the bars to clear it.
+- Hide any bar, or pick which drive to show, in **Settings > EnhUtils > Monitor**. Hide them all if you only want the other features; setting **Update rate** to 0 also stops collecting stats.
+- Only GPUs ComfyUI can use are shown (respects `CUDA_VISIBLE_DEVICES`). Without a usable GPU, only CPU, RAM and disk are shown.
+- NVIDIA stats need `nvidia-ml-py`, which is usually already installed with PyTorch.
 
-**GPU support:**
-- NVIDIA GPUs report utilization, VRAM, temperature and power via optional `nvidia-ml-py`
-- AMD (ROCm/ZLUDA) and Intel (XPU) GPUs show a VRAM bar only -- utilization, temperature and power have no cross-platform API, so those bars are not shown
-- Respects `CUDA_VISIBLE_DEVICES` -- only monitors GPUs ComfyUI can use
-- Safe ZLUDA detection (won't crash on AMD GPUs faking CUDA)
-- Falls back to CPU/RAM/disk only if no GPU is usable
-
-
----
-
-### Node Profiler
-
-Displays execution time badges on nodes after a workflow runs.
-
-<img src="docs/images/profiling_subgraph.png" width="700" alt="Profiling badges on root graph with subgraph total time">
-
-- **Per-node timing** -- a small badge above each node shows how long it took to execute (e.g., `1.23s` or `456ms`)
-- **Subgraph totals** -- subgraph container nodes show the aggregated time of all their internal nodes, updating live as children complete
-- **Persistent data** -- profiling badges survive navigating into/out of subgraphs, switching between workflows, and browser refreshes. Data is retained server-side and restored automatically on page load. Data only clears when the workflow is run again.
-
-Badges also display inside subgraphs:
-
-<img src="docs/images/profiling_subgraph_inside.png" width="700" alt="Profiling badges inside a subgraph">
-
-Enabled by default. Toggle in ComfyUI Settings: **Node Profiler - Enabled**.
-
-A per-node summary is also logged to the server console after each run. Turn it off with **Node Profiler - Console summary** (the badges keep working).
-
-To access profiling data programmatically within your workflow (e.g., for logging or conditional logic), use the [Profiler Timing](#profiler-timing) node. It can read the execution time of any node by linking to it or specifying its ID.
-
----
-
-### Node Navigation
-
-**Right-click canvas** (added to the bottom of the context menu)
-
-| Option | Description |
-|--------|-------------|
-| **Go to Node...** | Search box with a live filtered list of every node, subgraphs included. Type a node number (`12` / `#12`), a subgraph path (`5:12`) or part of a title or type. Typing a subgraph's name also lists everything inside it, below the direct matches; `5:` lists only what's inside subgraph #5, and `5: vae` filters within it. Renamed nodes show their original node name on the right; click it (or the funnel icon on other nodes) to list every node of that type, or click a `subgraph` badge to list its contents. **Tab** does the same for the highlighted row. Results show where the node lives (`Upscale (#5) > VAE Decode (#12)`); muted and bypassed nodes are dimmed. When a subgraph is open, its nodes are listed first. Up/Down + Enter or click to jump (navigating into subgraphs as needed), Esc to close. Also available as the `Search graph nodes` command, so you can bind a key to it. |
-| **Follow Execution** | Toggle that auto-pans the canvas to track the currently executing node in real time. |
-| **Show Executing Node** | One-shot jump to whichever node is currently running (only appears during execution). |
-
-<img src="docs/images/goto_node_search.png" width="600" alt="Go to Node search panel with subgraph breadcrumbs">
-
-Additionally draws a **green border** around the currently executing node.
-
-<img src="docs/images/follow_execution_in_graph.png" width="500" alt="Green border around executing node inside a subgraph">
+</details>
 
 ---
 
 ### Flow Visualizer
 
-**Right-click canvas > Flow visualization > Show**, or **right-click a node > Trace flow from here** (a quick look: the overlay turns itself off again when you deselect)
+**Right-click the canvas > Flow visualization > Show**, or right-click a node > **Trace flow from here**.
 
-An overlay that shows the order data flows through a workflow, so you don't have to trace noodles to understand a downloaded graph.
+An overlay that shows the order data flows through a workflow, so you can understand a graph without tracing noodles.
 
-- **Depth colours** -- every node gets a colour from how far it is from the start (longest path from a source), from red at the start to violet at the end. Links fade from their source node's colour to their target's, so a long red-to-violet link stands out as a long-range dependency (e.g. a VAE used at the very end).
-- **Pulse waves** -- a dashed pulse repeatedly travels from the start nodes through the graph, one depth step at a time. Nodes flash as the wave reaches them. Links spanning several steps carry the pulse proportionally slower.
-- **Hidden connections** -- Set/Get style nodes and [Use Everywhere](https://github.com/chrisgoringe/cg-use-everywhere) broadcasts are followed through and drawn as dashed ghost links; reroutes, bypassed nodes and subgraphs are followed through as well. The overlay draws its own noodles, so it also works with links hidden. Lines are drawn on top of nodes by default so stacked layouts stay readable; **Flow visualization > Draw lines under nodes** puts them underneath (outlines and badges stay on top).
-- **What won't run is greyed out** -- muted nodes, branches that don't lead to an output node, and outputs that would fail validation because a required input is cut off (e.g. by a muted node). Greyed nodes get a dark wash and only a faint border, like the dimming outside a selection.
-- **Tooltips** -- hover any badge (switch diamond, lazy-input diamond, **?**, or a last-run badge) for what it means.
-- **Switches** -- every visible connection is traced. Nodes with *lazy* inputs (switch-style nodes that only evaluate the branch they pick) get a diamond badge, with small diamonds on their lazy inputs. This is read from the node definitions, so it works with any node pack.
-- **Conditional nodes** -- nodes that may not run, because they only feed some branches of a switch, get a faded outline and a **?** badge. Nodes that feed every branch of a switch are known to run and stay normal. Select a conditional node to see which switch it depends on: the switch gets a pulsing ring, the path to it lights up, and **right-click > Go to gating switch** jumps to it (into subgraphs too).
-- **Follows the selection** -- with nothing selected the whole graph is shown; select node(s) and everything upstream and downstream stays lit while the rest is dimmed. Colours stay on the whole-workflow scale.
-- **While a workflow runs** -- the executing node gets a bright white pulsing ring (on the subgraph containing it when you're viewing the parent graph), and a "Running: ..." hint names it. Nodes that finish quickly leave a short fading ring, so even millisecond-fast nodes visibly blink. With nothing selected, the overlay traces the running node as if you had selected it; selecting something yourself takes over.
-- **Last run** -- **Flow visualization > Show last run** shows what actually happened in the most recent run instead of the prediction: nodes that ran keep their colours; nodes that were skipped (an untaken switch branch, an output that wasn't needed) or blocked, and the links that only fed them, are greyed out; cached nodes get a **↺** badge, blocked ones **⊘**, failed or interrupted ones a red / amber outline and **!**. Nodes you've edited since the run (widget values, links, new nodes) get a **Δ** badge, since the record no longer applies to them. A hint sums it up ("finished in 12.3 s -- 14 ran, 6 cached, 3 skipped"). It updates live while a workflow runs. A run from a different workflow isn't applied. Closing it (the bar's **×**, **Esc**, or **Hide last run**) turns the whole overlay off; picking **Show** in the menu while it's on switches to the plain flow visualization instead. Switching to another workflow closes it. Hover a badge for details: the error message of a failed node, or every change ("steps 20 → 33"; for long text or JSON, just the parts that differ, e.g. `…a «cat» → «dog» sitting…` or `list[1].y: 4 → 5`). A subgraph's badge names the changed nodes inside it.
-- **Replay** -- the last run opens with a replay bar at the bottom, at step 0, which shows the finished run (the same picture as the end). Press play, or drag along the timeline, to watch it in its real execution order. Nodes not reached yet stay dimmed but keep their corner badges, so you can see where it's heading. All cached nodes flash together first (their whole upstream is unchanged, so their outputs exist before anything runs). Then for each node, pulses travel in along the links that fed it and a ring holds on it for at least **Replay minimum per node** (500 ms), plus extra time that grows with the logarithm of how long it really took -- so fast nodes stay visible and a long sampler doesn't take over. Only the extra time is compressed to fit **Replay length**, so big workflows can take longer. Select a node during a replay to dim everything outside its path. ComfyUI doesn't run one path to the end before starting another: it prefers nodes that complete an output, otherwise runs whatever is ready, so independent branches interleave.
-  - The bar: **play / pause** on the left, **close** on the right, and a timeline in between with one segment per step, coloured like its node (cached, blocked and failed steps in their badge colours). Steps inside a subgraph get a thin bracket under the timeline (a second, thinner one for a subgraph nested inside it); hover a bracket to see the subgraph's name. Since branches interleave, one subgraph can show up as several brackets. Drag along it to go through the run at your own pace. The step being shown is named above the timeline; click the name to go to the node. When the bar has focus, **Space** plays or pauses, **Left / Right** step back or forward a node, **Home / End** jump to the start or end, and **Esc** leaves the subgraph you're in (one level at a time) or, at the top level, closes it. The replay stops at the end; press play to watch it again. While a run is in progress the bar is dimmed and inactive; when the run finishes it switches to the new run.
-- Updates live as you edit the graph. Works in subgraphs and in both the classic and the Nodes 2.0 renderer.
+<a href="docs/videos/flow_visualizer.mp4"><img src="docs/images/flow_visualizer.webp" width="700" alt="Flow Visualizer animation: pulses travelling through a workflow"></a>
 
-Also available as commands (bindable in the keybinding settings): **Toggle flow visualization**, **Toggle last run (flow visualization)**.
+<sub>Click for the full-quality video.</sub>
 
-The last-run record comes from the [Node Profiler](#node-profiler)'s backend hooks, which run whether or not the profiler badges are enabled. It is kept in memory: it survives a browser refresh but not a ComfyUI restart.
+- Nodes and links are coloured by step, from red (start) to violet (end), and pulses travel along the links.
+- Greys out what won't run, and marks switches and the nodes that depend on them.
+- Select nodes to highlight everything connected to them.
+- **Show last run**: see what actually ran, was cached, skipped, failed, or has changed since, and replay it step by step.
 
-**Settings** (ComfyUI Settings panel):
+#### Show last run
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Show colour gradient | on | Gradient links and depth-coloured node outlines (pulses and greying show either way). |
-| Pulse colour | Shift with depth | Pulse takes the colour of the depth it reached, or each wave keeps one colour. |
-| Seconds per depth step | 0.6 | Pulse speed. |
-| Seconds between waves | 5 | How often a new wave starts. |
-| Line width (px) | 3 | Overlay line width, constant at any zoom. |
-| Opacity | 0.75 | Opacity of the steady gradient layer. |
-| Dim strength (selection) | 0.8 | How strongly elements outside the selection's trace are dimmed. |
-| Mark switches and conditional nodes | on | Switch diamonds and conditional **?** badges / faded outlines. |
-| Draw lines under nodes | off | Lines and pulses below the nodes instead of on top (also in the canvas menu). |
-| Replay length (s) | 12 | Target length of a replay; only the extra time of slow nodes is compressed to fit. |
-| Replay minimum per node (ms) | 500 | Shortest time each node is shown running in a replay (and the length of the cached beat). |
-| Source placement | At start | Where nodes without inputs (loaders) sit: depth 0, or just before their first use. |
+**Flow visualization > Show last run** shows what really happened in the last run, and plays it back step by step.
 
-Limitations: the live overlay shows the *static* structure. Which branch a switch picks at run time, execution blockers and nodes that expand at run time (loops) aren't predicted -- use **Show last run** to see what actually happened. Nodes that inject links at queue time by rewriting the prompt (rather than through the frontend's link-resolution hooks or a record like Use Everywhere's) aren't followed. Instances of the same subgraph share one colouring inside the subgraph. "Changed since the run" ignores seed-style widgets that change themselves after queueing, and prompt text using dynamic-prompt syntax (`{a|b}`, comments). Runs queued through the API without a client id send no progress events, so they aren't recorded.
+<a href="docs/videos/flow_last_run_replay.mp4"><img src="docs/images/flow_last_run_replay.webp" width="600" alt="Show last run: replaying and scrubbing through a run"></a>
+
+<sub>Click for the full-quality video.</sub>
+
+**What did I change since the last run?** Nodes you've edited get a **Δ**. Hover it to see exactly what changed -- handy when you've been tweaking and forgot what you touched.
+
+<img src="docs/images/flow_changed_tooltip.png" width="490" alt="Δ tooltip listing the changes inside a subgraph since the last run">
+
+<details>
+<summary>How it works</summary>
+
+- **Colours** -- each node's colour comes from how far it is from the start. A long red-to-violet link is something made early and used late (e.g. a VAE).
+- **Hidden connections** -- Set/Get nodes and [Use Everywhere](https://github.com/chrisgoringe/cg-use-everywhere) are followed and drawn as dashed links. Reroutes, bypassed nodes and subgraphs are followed too, and it works with links hidden.
+- **Greyed out** -- muted nodes, branches that don't reach an output, and outputs that would fail because a required input is cut off.
+- **Switches** -- nodes that only run the branch they pick get a diamond badge. Nodes that may not run because of a switch get a faded outline and a **?**. Select one to see which switch it depends on; right-click > **Go to gating switch** jumps there.
+- **While running** -- the running node gets a white pulsing ring.
+- **Tooltips** -- hover any badge to see what it means.
+- Lines are drawn over nodes; **Flow visualization > Draw lines under nodes** puts them underneath.
+- Colours, pulse speed, line width, dimming and replay length can be changed in **Settings > EnhUtils > Flow**.
+- Also available as commands you can give a shortcut: **Toggle flow visualization**, **Toggle last run (flow visualization)**.
+
+</details>
+
+<details>
+<summary>Last run and replay</summary>
+
+**Flow visualization > Show last run** shows the most recent run instead of the prediction:
+
+<img src="docs/images/flow_last_run.webp" width="700" alt="Flow Visualizer showing the last run, mid-replay">
+
+| Badge | Meaning |
+|-------|---------|
+| ↺ | Cached -- reused from an earlier run |
+| ⊘ | Blocked |
+| ! | Failed or interrupted (hover for the error) |
+| Δ | Changed since the run (hover to see what changed, e.g. `steps 20 → 33`) |
+
+Skipped nodes are greyed out. It updates live while a workflow runs.
+
+**Replay** -- the bar at the bottom plays the run back in the order it actually ran. Drag along the timeline to scrub; click the step name to go to that node. Brackets under the timeline mark steps inside a subgraph.
+
+<img src="docs/images/flow_replay_bar.png" width="600" alt="Replay bar with run summary, step name and timeline">
+
+Keys (when the bar has focus): **Space** play/pause, **Left/Right** step, **Home/End** start/end, **Esc** leave the subgraph or close.
+
+Notes:
+- Fast nodes are stretched so you can see them, and slow ones are shortened, so the replay isn't real time.
+- ComfyUI doesn't finish one branch before starting another, so branches interleave.
+- The record is kept by the server: it survives a browser refresh, not a ComfyUI restart. A run from a different workflow isn't shown.
+
+</details>
+
+<details>
+<summary>Limitations</summary>
+
+- The live overlay shows the graph's structure. It can't predict which branch a switch picks, or nodes that expand while running (loops). Use **Show last run** for that.
+- Nodes that add links by rewriting the prompt when queued aren't followed.
+- Copies of the same subgraph share one colouring inside it.
+- **Changed since run** ignores seed widgets that change after queueing, and dynamic-prompt text (`{a|b}`).
+- Runs queued through the API without a client id aren't recorded.
+
+</details>
+
+---
+
+### Node Profiler
+
+Shows how long each node took, in a badge above it.
+
+<img src="docs/images/profiling_subgraph.webp" width="700" alt="Profiling badges on root graph with subgraph total time">
+
+- The running node counts up live.
+- Subgraphs show the total time of everything inside them.
+- Badges stay until the next run, even through a browser refresh.
+
+<details>
+<summary>More details</summary>
+
+Badges inside a subgraph:
+
+<img src="docs/images/profiling_subgraph_inside.webp" width="700" alt="Profiling badges inside a subgraph">
+
+- A summary is also printed to the server console after each run.
+- Both can be turned off in **Settings > EnhUtils > Profiler**.
+- To use timings inside a workflow, see the [Profiler Timing](#profiler-timing) node.
+
+</details>
+
+---
+
+### Profiler Timing
+
+Outputs how long nodes took, as numbers you can use in the workflow (for logging, file names, and so on).
+
+<img src="docs/images/profiler_timing_node.webp" width="700" alt="Profiler Timing node wired inline in a workflow">
+
+- **elapsed** -- how long the workflow has been running when it reaches this node.
+- **node_time** -- how long the nodes you pick took: link one to `node_link`, list IDs in `node_ids`, or both (they're added together).
+
+<details>
+<summary>Inputs and outputs</summary>
+
+| Input | Description |
+|-------|-------------|
+| any | Put the node in line; the value passes through unchanged. This controls when it runs. |
+| node_link | Connect any output of a node to time that node |
+| node_ids | Node IDs to time, comma-separated (e.g. `43,32:234`). A subgraph's ID gives the total of everything inside it. |
+
+| Output | Description |
+|--------|-------------|
+| passthrough | The `any` input, unchanged |
+| elapsed | Seconds since the run started |
+| node_time | Seconds taken by the chosen node(s), added together. 0 for cached nodes. |
+
+A plain ID like `54` used inside subgraph `123` looks for `123:54` first, then deeper inside `123`, then `54` at the top level.
+
+</details>
+
+---
+
+### Load Image (With Subfolders)
+
+Like Load Image, but it also shows images in subfolders, can load from any folder on disk, and outputs the image's embedded metadata (prompt, workflow) as JSON.
+
+<img src="docs/images/load_image_subfolders.webp" width="500" alt="Load Image (With Subfolders) node with the folder browser menu">
+
+- Pick from the input folder with `image`, or fill in `folder_path` and pick with `folder_image`.
+- The **📁 browse folders** button lets you pick a folder instead of typing it.
+- Preview, MaskEditor and paste work in both modes.
+
+<details>
+<summary>Inputs and outputs</summary>
+
+| Input | Description |
+|-------|-------------|
+| image | An image from the input folder (subfolders shown as `sub/image.png`) |
+| folder_path | Any folder, or one relative to the input folder. When set, `folder_image` is used instead of `image`. |
+| folder_image | An image from `folder_path` |
+
+| Output | Description |
+|--------|-------------|
+| image | The image. Animated and multi-page images give all frames. |
+| mask | From the alpha channel (empty if there isn't one) |
+| metadata | Embedded metadata as JSON, including `prompt` and `workflow`. Read from PNG, WebP, AVIF and JPEG. `{}` if none. |
+| imagedata | File info as JSON: `filename`, `path`, `width`, `height`, `resolution`, `size_bytes` |
+
+- Only re-runs when the file actually changes.
+- Handles truncated files, 16-bit images and palette transparency.
+- Use [Parse JSON](#parse-json-enhutils) to pull values out of `metadata`.
+- **Changed in v1.3.0:** the separate `prompt` output was removed; the prompt is now inside `metadata`.
+
+</details>
+
+<details>
+<summary>Restricting folders (shared servers)</summary>
+
+By default, `folder_path` can read any folder the ComfyUI server can. On a shared or `--listen` server you'll probably want to limit that. It's set on the server, so people using the UI can't change it.
+
+Rename `allowed_folders.rename.txt` (in this node pack's folder) to `allowed_folders.txt`:
+
+| `allowed_folders.txt` | Allowed |
+|---|---|
+| Missing (default) | Any folder |
+| Empty | Only the ComfyUI input folder |
+| One folder per line | Those folders and their subfolders, plus the input folder |
+
+- Lines starting with `#` are comments. Relative paths are relative to the input folder.
+- Changes apply right away, no restart. Updates don't overwrite the file.
+- Or set the `ENHUTILS_ALLOWED_FOLDERS` environment variable to a comma-separated list (same rules; set but empty = input folder only). If both are set, a folder must be allowed by both.
+
+</details>
+
+---
+
+### Node Navigation
+
+Right-click the canvas for **Go to node...**, **Follow execution** and **Show executing node**.
+
+#### Go to node
+
+Search for any node by name, type or number, and jump straight to it -- even deep inside subgraphs.
+
+<img src="docs/images/goto_node_search.webp" width="600" alt="Go to Node search panel with subgraph breadcrumbs">
+
+<details>
+<summary>Search tips</summary>
+
+- Type a node number (`12` or `#12`), a subgraph path (`5:12`), or part of a title or type.
+- A subgraph's name also lists everything inside it. `5:` lists only what's in subgraph #5; `5: vae` searches within it.
+- Click a renamed node's original type on the right (or the funnel icon) to list every node of that type. Click a `subgraph` badge to list its contents. **Tab** does the same for the highlighted row.
+- Up/Down to pick, Enter or click to jump, Esc to close.
+- Also available as the **Search graph nodes** command, so you can give it a shortcut.
+
+</details>
+
+#### Follow execution
+
+Turn it on and the canvas follows the running node as the workflow runs, opening subgraphs as needed. The running node gets a green border.
+
+<img src="docs/images/follow_execution_in_graph.webp" width="500" alt="Green border around executing node inside a subgraph">
+
+**Show executing node** (shown only while a workflow runs) jumps to the running node once, without following it.
 
 ---
 
 ### Graph Arrange
 
-**Right-click canvas > Arrange**
+**Right-click the canvas > Arrange** to auto-layout the graph (or subgraph) you're viewing. Groups are kept together.
 
-<img src="docs/images/arrange_menu.png" width="400" alt="Arrange context menu">
+<img src="docs/images/arrange_menu.png" width="450" alt="Arrange submenu in the canvas right-click menu">
 
-Multiple auto-layout algorithms for organizing your workflow, all with full group and subgraph support:
+| Option | |
+|--------|---|
+| **Center Graph** | Moves everything back to the middle. Handy when you're lost in empty space. |
+| **Quick** | Fast column layout |
+| **Smart (dagre)** | Good balance of quality and speed |
+| **Advanced (ELK)** | Best layout, fewest crossing links |
 
-| Option | Description |
-|--------|-------------|
-| **Center Graph (shift to 0,0)** | Shifts all nodes and groups so the graph is centered at the origin. Useful when navigating between subgraphs leaves you lost in empty space. |
-| **Quick (column aligned)** | Fast column-based layout with right-aligned nodes and barycenter sorting for reduced edge crossings. No external library needed. |
-| **Smart (dagre)** | Sugiyama layered layout via [dagre.js](https://github.com/dagrejs/dagre). Good balance of quality and speed. |
-| **Advanced (ELK)** | Port-aware Sugiyama layout via the [Eclipse Layout Kernel](https://github.com/kieler/elkjs). Models each input/output slot as a port for optimal edge routing and crossing minimization. Best layout quality. |
+Result with **Advanced (ELK)**:
+
+<img src="docs/images/arrange_advanced.png" width="700" alt="Graph arranged with Advanced (ELK)">
+
+<details>
+<summary>Before / after</summary>
 
 **Before:**
 
@@ -149,7 +307,7 @@ Multiple auto-layout algorithms for organizing your workflow, all with full grou
 
 <table>
 <tr>
-<td align="center"><strong>Quick (column aligned)</strong></td>
+<td align="center"><strong>Quick</strong></td>
 <td align="center"><strong>Smart (dagre)</strong></td>
 <td align="center"><strong>Advanced (ELK)</strong></td>
 </tr>
@@ -160,325 +318,224 @@ Multiple auto-layout algorithms for organizing your workflow, all with full grou
 </tr>
 </table>
 
-All layout algorithms:
-- **Respect groups** -- nodes inside groups are arranged within their group first, then groups are arranged as units
-- **Work in subgraphs** -- arranges only the graph level you're currently viewing
-- **Handle disconnected nodes** -- nodes with no connections are laid out in a compact grid below the main graph
-- **Flatten nested groups** -- nested groups are treated as part of their outermost parent
+</details>
 
-**Settings** (ComfyUI Settings panel):
+<details>
+<summary>More details</summary>
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Flow direction | LR | Left-to-Right or Top-to-Bottom. Affects Dagre and ELK. |
-| Node spacing | 50 | Gap between nodes in the same rank/column. |
-| Rank spacing | 80 | Gap between ranks (columns or rows). |
-| Group padding | 30 | Padding inside groups around the arranged nodes. |
+- Nodes in a group are arranged inside it, then groups are arranged as blocks. Nested groups count as part of their outer group.
+- Nodes with no connections go in a grid below the graph.
+- Direction (left-to-right or top-to-bottom), spacing and group padding are in **Settings > EnhUtils > Arrange**.
+
+</details>
 
 ---
-
-## Nodes
 
 ### Play Sound
 
-Plays an audio file when execution reaches this node. Useful for alerting you when a long workflow completes.
+Plays a sound when the workflow reaches it, e.g. to tell you a long run has finished. Whatever you connect passes through unchanged.
 
-| Input | Type | Description |
-|-------|------|-------------|
-| any | Any (passthrough) | Connect any output to trigger the sound. Passed through unchanged. |
-| mode | Combo | `always` or `on empty queue` (only plays when the queue finishes). |
-| volume | Float | Playback volume (0.0 - 1.0). |
-| file | String | Sound file name (from assets/) or a full URL. Default: `notify.mp3`. |
+<img src="docs/images/play_sound_node.png" width="300" alt="Play Sound node">
 
-| Output | Type | Description |
-|--------|------|-------------|
-| passthrough | Same as input | The input value, passed through unchanged. |
+<details>
+<summary>Inputs</summary>
 
-### System Notification
+| Input | Description |
+|-------|-------------|
+| any | Connect anything to trigger it; passed through to the output |
+| mode | `always`, or `on empty queue` (only when the queue finishes) |
+| volume | 0.0 - 1.0 |
+| file | A file from `assets/` or a URL. Default: `notify.mp3` |
 
-Sends a browser notification when execution reaches this node. The browser will request notification permission when the node is first added to the graph.
-
-| Input | Type | Description |
-|-------|------|-------------|
-| message | String | The notification body text. |
-| any | Any (passthrough) | Connect any output to trigger the notification. Passed through unchanged. |
-| mode | Combo | `always` or `on empty queue`. |
-
-| Output | Type | Description |
-|--------|------|-------------|
-| passthrough | Same as input | The input value, passed through unchanged. |
-
-### Profiler Timing
-
-Reads execution timing data from the profiler and outputs it as float values. Wire inline via the pass-through to guarantee execution order.
-
-<img src="docs/images/profiler_timing_node.png" width="700" alt="Profiler Timing node wired inline in a workflow">
-
-| Input | Type | Description |
-|-------|------|-------------|
-| any | Any (passthrough) | Connect any output to place this node inline in the workflow. Data passes through unchanged. |
-| node_link | Any (optional) | Connect any output from a node to measure that node's execution time. The data itself is ignored. |
-| node_ids | String (optional) | Comma-separated node IDs to look up (e.g. `43,32:234,54`). Plain IDs resolve relative to the current subgraph first, then root. Subgraph container IDs return the total of all nodes inside. |
-
-| Output | Type | Description |
-|--------|------|-------------|
-| passthrough | Same as input | The `any` input forwarded unchanged (type-matched). |
-| elapsed | Float | Wall-clock seconds since execution started. Unique to each instance based on where it sits in the workflow. |
-| node_time | Float | Execution time in seconds for the resolved node(s). Summed if multiple IDs are provided. Returns 0.0 for cached or unresolved nodes. |
-
-**ID resolution order** (for plain IDs like `54` when the node is inside subgraph `123`):
-1. Same subgraph level: `123:54`
-2. Nested child: `123:*:54`
-3. Root level: `54`
-4. If the resolved ID is a subgraph container, returns the sum of all nodes inside it
-
-Both `node_link` and `node_ids` are additive -- their resolved times are summed together.
+</details>
 
 ---
 
-### Load Image (With Subfolders)
+### System Notification
 
-**Category: image** | **Node: Load Image (With Subfolders)**
+Shows a browser notification when the workflow reaches it. Whatever you connect passes through unchanged.
 
-An enhanced image loader that recursively scans for images (including all subfolders) and extracts embedded metadata from PNG, WebP and AVIF files. It works in two modes:
+<img src="docs/images/system_notification_node.png" width="300" alt="System Notification node">
 
-- **Default mode** -- pick from the ComfyUI input directory via the `image` dropdown (recursively scanned, subfolders shown as `subfolder/filename.png`).
-- **Custom-folder mode** -- set `folder_path` to any folder on disk and pick from it via the `folder_image` dropdown.
+<details>
+<summary>Inputs</summary>
 
-Setting `folder_path` switches to custom-folder mode and overrides the `image` dropdown. The node automatically shows only the widgets relevant to the active mode.
+| Input | Description |
+|-------|-------------|
+| message | The notification text |
+| any | Connect anything to trigger it; passed through to the output |
+| mode | `always` or `on empty queue` |
 
-The **📁 browse folders** button under `folder_path` opens a menu of subfolders, starting from the current `folder_path` (or the input directory if it's empty). Pick a subfolder to set `folder_path`, use **⬆ ..** to go up a level, or **✔ use this folder** to select the folder you're viewing. If an allowlist is configured, its root folders are listed too. You can still type any path directly.
+The browser asks for permission the first time you add the node.
 
-<img src="docs/images/load_image_subfolders.png" width="500" alt="Load Image (With Subfolders) node with the folder browser menu">
-
-| Input | Type | Description |
-|-------|------|-------------|
-| image | Combo (with upload) | Default mode. Select an image from the input directory. Subfolders are fully supported and shown as `subfolder/filename.png`. |
-| folder_path | String (optional) | Absolute path, or a path relative to the input directory. When set, switches to custom-folder mode and scans the folder recursively. |
-| folder_image | Combo (optional) | Custom-folder mode. The image to load from `folder_path`. Populated automatically when `folder_path` is set. |
-
-| Output | Type | Description |
-|--------|------|-------------|
-| image | IMAGE | The loaded image tensor. Supports multi-frame (GIF, APNG, TIFF), 16-bit, and palette transparency. |
-| mask | MASK | Alpha mask (or zeros if no alpha channel). |
-| metadata | STRING | Full embedded metadata as JSON, including `prompt` and `workflow` (PNG text chunks, WebP/AVIF EXIF, JPEG EXIF). Empty `{}` if none found. |
-| imagedata | STRING | File stats as JSON: `filename`, `path` (directory only), `width`, `height`, `resolution`, `size_bytes`. |
-
-> **Breaking change (v1.3.0+)** -- the standalone `prompt` output was removed. The embedded prompt now lives inside the `metadata` JSON (alongside `workflow`). Use the **Parse JSON (EnhUtils)** node to pull values back out as structured objects.
-
-Improvements over other image loaders:
-- **Custom-folder loading** -- load from any folder on disk (absolute or input-relative) via `folder_path`, scanned recursively
-- **Folder browser** -- pick `folder_path` from a subfolder menu instead of typing it
-- **Recursive subfolder scanning** with `os.walk`
-- **Live preview** -- the selected custom-folder image previews on the node in both renderers, served in place (nothing is copied)
-- **MaskEditor + Paste (Clipspace)** -- supported in custom-folder mode from every MaskEditor entry point; re-opening MaskEditor reloads an existing mask
-- **Primitive node support** -- the `folder_image` combo populates on a connected Primitive node, updating on page load, `folder_path` change, and global refresh
-- **Content-type filtering** -- only shows actual image files (uses ComfyUI's MIME-type detection)
-- **Truncated image recovery** -- uses `node_helpers.pillow()` for resilient loading
-- **Multi-frame support** -- handles animated GIF/APNG, multi-page TIFF, MPO format
-- **16-bit image support** -- properly normalizes `I` mode images
-- **Palette transparency** -- handles `P` mode images with transparency info
-- **Metadata extraction** -- PNG text chunks, WebP/AVIF EXIF (ComfyUI `prompt`/`workflow` tags), JPEG EXIF
-- **SHA-256 caching** -- only re-executes when the file on disk actually changes
-- Excludes system files (`Thumbs.db`, `.DS_Store`, `desktop.ini`), dot-folders, and the `clipspace` temp folder
-
-#### Restricting custom folders
-
-By default, custom-folder mode can list, preview and load images from **any folder** the ComfyUI server can read. That's fine locally, but on a shared or `--listen` server you'll likely want to restrict it. This is controlled on the server's filesystem, not in the UI settings, so users of the UI can't turn it back off.
-
-Rename `allowed_folders.rename.txt` (in this node pack's folder) to `allowed_folders.txt`:
-
-| `allowed_folders.txt` | Allowed folders |
-|---|---|
-| Missing (default) | Any folder |
-| Present, no entries | ComfyUI input folder only |
-| Present, one folder per line | Those folders and their subfolders, plus the input folder |
-
-Lines starting with `#` are comments; relative paths resolve against the input folder. Edits apply immediately, no restart needed. The file is gitignored, so node updates don't touch it.
-
-Alternatively set the `ENHUTILS_ALLOWED_FOLDERS` environment variable, with the same rules and a comma-separated list (set but empty = input folder only). It survives uninstall/reinstall of the node pack. If both are set, a folder must be allowed by both.
-
-Blocked folders show a warning toast in the UI and fail validation if queued. Subfolders of the input folder always work.
+</details>
 
 ---
 
 ### Parse JSON (EnhUtils)
 
-**Category: utils** | **Node: Parse JSON (EnhUtils)**
+Turns JSON text into data that other nodes can use. Handy with **Load Image (With Subfolders)** metadata, LLM output, and scripting nodes like [rgthree](https://github.com/rgthree/rgthree-comfy)'s Power Puter.
 
-Parses one or more JSON strings into a native Python object (dict, list, number, etc.) so it can be consumed by nodes that accept any-type inputs. Pairs well with the `metadata`/`imagedata` outputs of **Load Image (With Subfolders)**, with LLM text output, and with scripting nodes like [rgthree](https://github.com/rgthree/rgthree-comfy)'s Power Puter.
+<img src="docs/images/parse_json_node.png" width="300" alt="Parse JSON node">
 
-| Input | Type | Description |
-|-------|------|-------------|
-| json0, json1, ... | String (optional, autogrow) | JSON strings. A new slot appears as each one is connected (up to 10). |
-| lenient | Boolean | Recover JSON from LLM-style output (default on). See below. |
-| path | String | Optional path to a nested value, e.g. `workflow.nodes.0.type`, `items[2].name` or `prompt.3.inputs.seed`. Empty = whole result. |
+- Connect several JSON inputs to combine them.
+- Use `path` to pick one value, e.g. `prompt.3.inputs.seed`.
+- Forgiving: handles LLM-style output (code fences, trailing commas) and never stops the workflow on bad input.
 
-| Output | Type | Description |
-|--------|------|-------------|
-| data | Any | The parsed (and combined) Python object. |
-| json_string | String | The result re-serialized as indented JSON. |
+<details>
+<summary>Inputs, outputs and details</summary>
 
-**Never fails on bad input.** Unconnected inputs (e.g. the upstream node is bypassed) and empty strings are ignored. Invalid JSON, or a `path` that doesn't exist, logs a warning and shows a toast in the UI; the invalid input is skipped (a missing path outputs `{}`). If no input has data, the output is `{}`.
+| Input | Description |
+|-------|-------------|
+| json0, json1, ... | JSON text. A new input appears as you connect each one (up to 10). |
+| lenient | Fix up LLM-style output (default on) |
+| path | A nested value to output, e.g. `workflow.nodes.0.type` or `items[2].name`. Empty = everything. |
 
-**Combining inputs** (in slot order):
-- One value of any type passes through unchanged.
-- All objects: deep-merged. Nested objects are merged recursively, and for any other conflicting key the later slot wins (nested arrays are replaced, not concatenated).
-- All arrays: concatenated.
-- Anything else (e.g. an object and an array) is an error.
+| Output | Description |
+|--------|-------------|
+| data | The parsed data |
+| json_string | The result as formatted JSON text |
 
-**Lenient parsing** applies only when strict JSON parsing fails. It strips markdown code fences and surrounding text, removes trailing commas, and accepts Python-style literals (single quotes, `True`/`False`/`None`) via `ast.literal_eval`, which never executes code.
+**Combining inputs:** objects are merged (later inputs win), lists are joined end to end, a single input passes through as is. Mixing objects and lists is an error.
 
-> **Breaking change (v1.7.0+)** -- the single `json_string` input was replaced by autogrow `json0`, `json1`, ... inputs. Existing workflows lose that link on load; reconnect it to `json0`.
+**Bad input:** empty or unconnected inputs are ignored. Invalid JSON, or a `path` that doesn't exist, shows a warning and is skipped. With nothing usable, the output is `{}`.
+
+**Lenient mode** only kicks in when normal parsing fails. It removes markdown code fences and surrounding text, trailing commas, and accepts Python-style values (`'single quotes'`, `True`, `None`). It never runs code.
+
+**Changed in v1.7.0:** the single `json_string` input became `json0`, `json1`, ... Reconnect old workflows to `json0`.
+
+</details>
 
 ---
 
 ### Execution Gate (EnhUtils)
 
-**Category: utils** | **Node: Execution Gate (EnhUtils)**
+Skips the rest of a branch when a boolean is false -- without an error, and without running the nodes that feed it. For example: skip an expensive generation when an LLM's text fails a check. The queue keeps going, so auto-queue isn't interrupted.
 
-A conditional pass-through that stops the rest of a branch from running when a boolean is false -- without erroring, and without forcing its own upstream to run. Typical use: an LLM generates text, a length/range check reduces it to a boolean, and the gate sits between the text and an expensive generator. Bad text skips the generator; the queue continues normally (auto-queue / "Run (Instant)" is not interrupted).
+<img src="docs/images/execution_gate_node.png" width="300" alt="Execution Gate node">
 
-| Input | Type | Description |
-|-------|------|-------------|
-| enabled | Boolean | `true` passes `value` through. `false` blocks. Connect a computed boolean or toggle it manually. |
-| value | Any (lazy, type-matched) | The value to pass through. **Only evaluated when `enabled` is true** -- when false, the nodes feeding it do not run. |
+<details>
+<summary>Inputs and details</summary>
 
-| Output | Type | Description |
-|--------|------|-------------|
-| value | Same as input | The original value when enabled, or a silent execution blocker when disabled. Downstream nodes are skipped, not errored. |
+| Input | Description |
+|-------|-------------|
+| enabled | `true` passes `value` through, `false` blocks |
+| value | Anything. Only runs when `enabled` is true. |
 
-Because a silent block looks the same as any other reason a branch didn't run, the gate announces itself when it blocks: a warning toast in the UI ("Execution Gate: blocked") and an INFO line in the server console. Neither affects execution or stops auto-queue.
+| Output | Description |
+|--------|-------------|
+| value | `value` when enabled. When disabled, the nodes after it are skipped. |
 
-How it differs from Impact Pack's **Control Bridge** (Stop mode):
-- **Not an output node.** Control Bridge is, which makes ComfyUI treat everything upstream of it as required -- so the LLM ran on every queue even when its text was discarded or disconnected. The gate is pruned like any normal node: if its output does not reach a real output, neither the gate nor anything feeding it executes.
-- **Lazy `value`.** When `enabled` is false the `value` input is never requested, so its upstream nodes are skipped rather than executed and discarded.
-- Uses only ComfyUI's native lazy-input and `ExecutionBlocker` mechanisms -- no mute/bypass manipulation, no node-ID lookups -- so it works unchanged inside subgraphs.
+When it blocks, you get a toast in the UI and a line in the server console.
+
+**Compared to Impact Pack's Control Bridge (Stop mode):**
+- Control Bridge is an output node, so everything before it always runs, even when its result is thrown away. The gate only runs if something after it needs it.
+- When disabled, the nodes feeding `value` don't run at all.
+- Uses only ComfyUI's built-in mechanisms, so it works inside subgraphs.
+
+</details>
 
 ---
 
 ## Installation
 
-### ComfyUI Manager
-
-Search for "Enhancement Utils" in the ComfyUI Manager.
-
-### Manual
-
-Clone the repository into your `custom_nodes` directory:
+Search for **Enhancement Utils** in the ComfyUI Manager, or clone it into `custom_nodes`:
 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/phazei/ComfyUI-Enhancement-Utils.git
+pip install -r ComfyUI-Enhancement-Utils/requirements.txt
 ```
 
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-For NVIDIA GPU monitoring (optional; usually already present since PyTorch pulls it in):
+For NVIDIA GPU stats you need `nvidia-ml-py` (usually already installed with PyTorch):
 
 ```bash
 pip install nvidia-ml-py
 ```
 
-`nvidia-ml-py` is NVIDIA's official package and provides the `pynvml` module. The separate `pynvml` package on PyPI is a deprecated shim that just depends on `nvidia-ml-py` and prints a `FutureWarning` -- don't install that one.
+Don't install the package called `pynvml`; it's an outdated wrapper around `nvidia-ml-py`.
 
----
-
-## Dependencies
+<details>
+<summary>Dependencies</summary>
 
 | Package | Required | Purpose |
 |---------|----------|---------|
-| `psutil` | Yes (bundled with ComfyUI) | CPU, RAM, and disk monitoring |
-| `nvidia-ml-py` | Optional | NVIDIA GPU monitoring via the `pynvml` module (graceful fallback if missing) |
-| `Pillow` | Yes (bundled with ComfyUI) | Image loading and EXIF metadata extraction |
-| `torch`, `numpy` | Yes (bundled with ComfyUI) | Tensor operations |
+| `psutil` | Yes (comes with ComfyUI) | CPU, RAM and disk stats |
+| `nvidia-ml-py` | Optional | NVIDIA GPU stats |
+| `Pillow`, `torch`, `numpy` | Yes (come with ComfyUI) | Images |
 
-Vendored JavaScript libraries (no npm/build step required):
-- [dagre 0.8.5](https://github.com/dagrejs/dagre) (~284KB) -- Sugiyama layout algorithm
-- [elkjs 0.11.1](https://github.com/kieler/elkjs) (~1.5MB) -- Eclipse Layout Kernel
+Included JavaScript libraries (nothing to install): [dagre 0.8.5](https://github.com/dagrejs/dagre) and [elkjs 0.11.1](https://github.com/kieler/elkjs) for Graph Arrange.
 
----
+</details>
 
-## Project Structure
+<details>
+<summary>Project structure (for developers)</summary>
 
 ```
 ComfyUI-Enhancement-Utils/
 ├── __init__.py                    # V3 entrypoint (comfy_entrypoint)
 ├── pyproject.toml                 # Package metadata
-├── LICENSE                        # MIT
-│
-├── nodes/
-│   ├── play_sound.py              # PlaySound node
-│   ├── system_notification.py     # SystemNotification node
-│   ├── image_load_subfolders.py   # ImageLoadWithSubfolders node
-│   ├── profiler_timing.py         # ProfilerTiming node
-│   ├── parse_json.py              # ParseJSON node
-│   └── execution_gate.py          # ExecutionGate node (lazy conditional pass-through)
-│
-├── monitor/
-│   ├── collector.py               # Background stats polling thread
-│   ├── gpu.py                     # NVIDIA GPU abstraction layer
-│   ├── hardware.py                # CPU/RAM/Disk stats via psutil
-│   └── routes.py                  # HTTP API endpoints
-│
-├── profiler/
-│   ├── __init__.py                # Module setup, triggers hooks on import
-│   ├── hooks.py                   # Monkey-patches for execution timing and last-run states
-│   └── routes.py                  # HTTP API endpoints for profiler results / last run
-│
-├── src/                           # Build source (not served by ComfyUI)
-│   ├── nodeProfilerBadge.ts       # Vue-aware profiler badge (Nodes 2.0 compatible)
-│   ├── vite.config.ts             # Vite build config
-│   └── package.json               # Build dependencies
-│
-    └── js/                            # Served by ComfyUI (WEB_DIRECTORY = "./js")
-        ├── utils.js                   # Shared subgraph/exec-ID utilities
-        ├── graphArrange.js            # Graph layout algorithms + menu
-        ├── nodeNavigation.js          # Go to Node, Follow Execution
-        ├── nodeSearch.js              # "Go to node..." search panel
-        ├── nodeSearchMatch.js         # Node search collection + matching (pure)
-        ├── nodeSearch.css             # Node search panel styling
-        ├── flowGraph.js               # Flow Visualizer model (effective data flow, depths)
-        ├── flowRun.js                 # Flow Visualizer last-run view and replay timeline
-        ├── canvasMenu.js              # Shared canvas menu block (orders our entries together)
-        ├── flowVisualizer.js          # Flow Visualizer overlay, menus, settings
-        ├── nodeProfiler.js            # Execution time badges (both renderers)
-        ├── playSound.js               # PlaySound client handler
-        ├── systemNotification.js      # Browser Notification handler
-        ├── executionGate.js           # Toast when an Execution Gate blocks
-        ├── parseJson.js               # Toast for Parse JSON warnings
-        ├── resourceMonitor.js         # Monitor UI (bars, settings, cost tracking)
-        ├── resourceMonitorGraph.js    # Historical graph popup (Canvas 2D)
-        ├── resourceMonitor.css        # Monitor + popup + context menu styling
-        ├── assets/notify.mp3          # Default notification sound
-        ├── built/                     # Vite build output (for future use)
-        └── lib/
-        ├── dagre.min.js           # Vendored dagre library
-        └── elk.bundled.min.js     # Vendored ELK library
+├── nodes/                         # V3 nodes
+│   ├── play_sound.py
+│   ├── system_notification.py
+│   ├── image_load_subfolders.py
+│   ├── profiler_timing.py
+│   ├── parse_json.py
+│   └── execution_gate.py
+├── monitor/                       # Resource monitor backend
+│   ├── collector.py               # Background polling thread
+│   ├── gpu.py                     # GPU stats
+│   ├── hardware.py                # CPU / RAM / disk stats
+│   └── routes.py                  # HTTP endpoints
+├── profiler/                      # Execution timing + last-run record
+│   ├── hooks.py
+│   └── routes.py
+├── src/                           # Vite/TypeScript build source
+└── js/                            # Frontend (WEB_DIRECTORY)
+    ├── utils.js                   # Shared subgraph / exec-id helpers
+    ├── canvasMenu.js              # Shared canvas menu block
+    ├── graphArrange.js            # Graph Arrange
+    ├── nodeNavigation.js          # Go to node, Follow execution
+    ├── nodeSearch.js, nodeSearchMatch.js, nodeSearch.css
+    ├── flowGraph.js               # Flow Visualizer model
+    ├── flowRun.js                 # Last run view + replay timeline
+    ├── flowVisualizer.js          # Flow Visualizer overlay
+    ├── nodeProfiler.js            # Timing badges
+    ├── resourceMonitor.js, resourceMonitorGraph.js, resourceMonitor.css
+    ├── playSound.js, systemNotification.js, executionGate.js, parseJson.js
+    ├── assets/notify.mp3
+    ├── built/                     # Vite output
+    └── lib/                       # dagre, ELK
 ```
 
-All Python nodes use the **V3 schema** (`comfy_api.latest`) with `io.ComfyNode`, `define_schema()`, and `io.NodeOutput`. Most frontend extensions are plain JavaScript (no build step). Extensions requiring Vue reactivity for Nodes 2.0 compatibility are built from TypeScript source in `src/` using Vite.
+Nodes use the V3 schema (`comfy_api.latest`). Most frontend code is plain JavaScript; parts that need Vue are built from `src/` with Vite. See `AGENTS.md` for the details.
+
+</details>
 
 ---
 
+## More nodes by phazei
+
+- **[Prompt Stash](https://github.com/phazei/ComfyUI-Prompt-Stash)** -- save and organise prompts in lists, capture an LLM's output straight into your stash, or pause the workflow to edit text before it continues.
+- **[Multi LoRA Loader](https://github.com/phazei/ComfyUI-MultiLoRALoader)** -- stack any number of LoRAs in one tidy node: drag to reorder, drop files on it, see each LoRA's rank, and set per-layer strengths for LTX video and audio. Includes a cycle node for testing training checkpoints.
+- **[Camera Path](https://github.com/phazei/ComfyUI-Camera-Path)** -- draw a camera move in a 3D editor and turn a single image into a reference video flying around the scene (uses ComfyUI's built-in MoGe).
+
+## Support
+
+If these tools save you some time, a tip on **[Ko-fi](https://ko-fi.com/phazei)** is always appreciated. Bug reports and ideas are welcome too.
+
+<a href="https://ko-fi.com/phazei"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi"></a>
+
+---
 ## Acknowledgements
 
-This package combines and improves upon work from:
+Rewritten and improved from:
 
-- **[ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts)** by [pythongosssss](https://github.com/pythongosssss) -- Original source for PlaySound, SystemNotification, Node Navigation (Go to Node, Follow Execution), and Graph Arrange (Float Left/Right). These features have been rewritten for the V3 API, with improvements including proper `MatchType` for wildcard passthrough (replacing the `AnyType(str)` hack), barycenter sorting for reduced edge crossings, and disconnected node handling.
-
-- **[ComfyUI-Crystools](https://github.com/crystian/ComfyUI-Crystools)** by [crystian](https://github.com/crystian) -- Original source for the Resource Monitor and ImageLoadWithMetadata. The monitor has been rewritten with fixes for thread deadlocks (`asyncio.run()` in thread), GPU crash safety (ZLUDA detection, `UnicodeDecodeError` on GPU names), fast startup (platform-native CPU detection instead of `py-cpuinfo`), and `CUDA_VISIBLE_DEVICES` support. The image loader combines Crystools' subfolder scanning with ComfyUI's built-in robustness (multi-frame, truncated image recovery, palette transparency).
-
-- **[dagre](https://github.com/dagrejs/dagre)** -- JavaScript library for directed graph layout using the Sugiyama algorithm. MIT licensed.
-
-- **[elkjs](https://github.com/kieler/elkjs)** -- JavaScript port of the Eclipse Layout Kernel, providing advanced port-aware layered layout. EPL-2.0 licensed.
-
----
+- **[ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts)** by pythongosssss -- Play Sound, System Notification, Go to Node, Follow Execution, arranging
+- **[ComfyUI-Crystools](https://github.com/crystian/ComfyUI-Crystools)** by crystian -- Resource Monitor, image loading with metadata
+- **[comfyui-profiler](https://github.com/aigc-apps/comfyui-profiler)** by aigc-apps -- node timing
+- **[dagre](https://github.com/dagrejs/dagre)** (MIT) and **[elkjs](https://github.com/kieler/elkjs)** (EPL-2.0) -- layout libraries
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT. See [LICENSE](LICENSE).

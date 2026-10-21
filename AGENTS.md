@@ -166,6 +166,15 @@ This is NOT a kitchen-sink package. Features are included because they fill real
 - `async/await` for ELK (which returns Promises), regular functions for everything else
 - Defensive checks: `node.inputs || []`, `out.links?.length > 0`, etc.
 
+### README
+
+The README is for users, not a changelog. Keep the first look short:
+
+- Each section: one or two plain sentences, a picture if there is one, and at most 3-4 bullets.
+- Everything else (input/output tables, settings, keys, limitations, edge cases) goes in a collapsed `<details><summary>...</summary>` block, with a blank line after `<summary>` so the markdown renders.
+- Describe what the user sees and does, not how it's implemented. Implementation notes belong in this file.
+- A small tweak gets a word or a table row, or nothing at all. Don't add a sentence for every change.
+
 ## Key Gotchas
 
 Things that caused bugs or required non-obvious solutions:

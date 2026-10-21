@@ -4722,7 +4722,7 @@ const SETTINGS = [
         attrs: { min: 3, max: 120, step: 1 },
         defaultValue: 12,
         sortOrder: 12,
-        tooltip: "Target length of a \"Replay last run\" animation. Every node holds at least the minimum below, " +
+        tooltip: "Target length of the last-run replay. Every node holds at least the minimum below, " +
             "plus extra time that grows with how long it really took; only that extra is compressed to fit, " +
             "so workflows with many nodes can take longer.",
         onChange: (v) => {
@@ -4736,7 +4736,7 @@ const SETTINGS = [
         attrs: { min: 100, max: 3000, step: 50 },
         defaultValue: 500,
         sortOrder: 11,
-        tooltip: "Shortest time a node is shown running during \"Replay last run\", so fast nodes stay visible. " +
+        tooltip: "Shortest time a node is shown running during the last-run replay, so fast nodes stay visible. " +
             "All cached nodes share one beat of this length at the start.",
         onChange: (v) => {
             config.replayMinNodeMs = clampNumber(v, 100, 3000, 500);
