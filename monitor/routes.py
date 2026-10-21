@@ -64,8 +64,9 @@ async def update_settings(request: web.Request) -> web.Response:
             monitor_instance.stop()
         elif old_rate <= 0 and new_rate > 0:
             monitor_instance.start()
-        elif monitor_instance.is_running:
+        elif monitor_instance.is_running and new_rate != old_rate:
             # Rate changed while running; restart to pick up new interval.
+            # (Unchanged rates arrive on every page load / reconnect resync.)
             monitor_instance.start()
 
     return web.json_response({"status": "ok"})

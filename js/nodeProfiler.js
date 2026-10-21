@@ -421,6 +421,17 @@ function refreshAllProfiledBadges() {
     app.graph?.setDirtyCanvas?.(true, false);
 }
 
+/**
+ * Send the console-summary flag to the backend (held in server memory only).
+ * @param {boolean|undefined} value - Setting value; undefined = default (on).
+ */
+function syncConsoleSummary(value) {
+    api.fetchApi("/enhutils/profiler/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ console_summary: value !== false }),
+    }).catch(() => { /* older backend; ignore */ });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Extension Registration
 // ═══════════════════════════════════════════════════════════════════════════
@@ -441,11 +452,14 @@ app.registerExtension({
                 "after each run. Independent of the badges.",
             onChange(v) {
                 // Server-side flag; resent on every page load via this onChange.
-                api.fetchApi("/enhutils/profiler/settings", {
-                    method: "PATCH",
-                    body: JSON.stringify({ console_summary: !!v }),
-                }).catch(() => { /* older backend; ignore */ });
+                syncConsoleSummary(v);
             },
+        });
+
+        // A ComfyUI restart with the tab left open resets the flag to its
+        // server default without reloading the page, so resend it.
+        api.addEventListener("reconnected", () => {
+            syncConsoleSummary(app.ui.settings.getSettingValue(SETTING_CONSOLE_SUMMARY));
         });
 
         app.ui.settings.addSetting({

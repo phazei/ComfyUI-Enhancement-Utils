@@ -1097,5 +1097,67 @@ app.registerExtension({
                 } catch (e) { /* ignore */ }
             },
         });
+
+        // ── Resync server state on reconnect ───────────────────────────
+        //
+        // The monitor settings live in server memory and are only pushed by
+        // the onChange handlers above (page load + user edits). A ComfyUI
+        // restart with the tab left open resets them to the server defaults
+        // while the UI keeps the user's values, so push them all again.
+        api.addEventListener("reconnected", () => syncMonitorSettings(gpuList));
     },
 });
+
+/**
+ * Push every server-side monitor setting to the backend from the stored
+ * frontend values. Settings that were never registered (e.g. utilization
+ * on a VRAM-only device) are left out.
+ * @param {Array<{index: number}>} gpuList - Monitored GPUs from the backend.
+ * @returns {Promise<void>}
+ */
+async function syncMonitorSettings(gpuList) {
+    /**
+     * Copy the defined values of `map` (body key -> setting id) into a body.
+     * @param {Object<string, string>} map
+     * @returns {Object|null} Request body, or null when nothing is set.
+     */
+    const collect = (map) => {
+        const body = {};
+        for (const [key, id] of Object.entries(map)) {
+            const value = app.ui.settings.getSettingValue(id);
+            if (value !== undefined && value !== null) body[key] = value;
+        }
+        return Object.keys(body).length ? body : null;
+    };
+
+    /**
+     * PATCH a body to a monitor endpoint, ignoring failures.
+     * @param {string} path
+     * @param {Object|null} body
+     */
+    const send = async (path, body) => {
+        if (!body) return;
+        try {
+            await api.fetchApi(path, { method: "PATCH", body: JSON.stringify(body) });
+        } catch (e) { /* ignore */ }
+    };
+
+    await send(API_BASE, collect({
+        switchCPU: "EnhUtils.Monitor.ShowCpu",
+        switchRAM: "EnhUtils.Monitor.ShowRam",
+        switchDisk: "EnhUtils.Monitor.ShowDisk",
+        switchDiskIO: "EnhUtils.Monitor.ShowDiskIO",
+        whichDisk: "EnhUtils.Monitor.WhichDisk",
+        rate: "EnhUtils.Monitor.Rate",
+    }));
+
+    for (const gpu of gpuList || []) {
+        const idx = gpu.index;
+        await send(`${API_BASE}/gpu/${idx}`, collect({
+            utilization: `EnhUtils.Monitor.ShowGpu${idx}`,
+            vram: `EnhUtils.Monitor.ShowVram${idx}`,
+            temperature: `EnhUtils.Monitor.ShowTemp${idx}`,
+            power: `EnhUtils.Monitor.ShowPower${idx}`,
+        }));
+    }
+}
