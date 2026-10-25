@@ -291,31 +291,32 @@ Turn it on and the canvas follows the running node as the workflow runs, opening
 | **Smart (dagre)** | One straight line from start to finish (Left-Right or Top-Bottom) |
 | **Advanced (ELK)** | Compact: the flow wraps into rows, like text, to fit a 16:9 shape (Left-Right or Top-Bottom) |
 
-Result with **Advanced (ELK)**:
-
-<img src="docs/images/arrange_advanced.png" width="700" alt="Graph arranged with Advanced (ELK)">
-
-<details>
-<summary>Before / after</summary>
-
 **Before:**
 
-<img src="docs/images/arrange_before.png" width="700" alt="Graph before arranging">
+<img src="docs/images/arrange_simple_before.png" width="500" alt="Simple grouped workflow before arranging">
 
-**After:**
+**After**, with **Advanced (ELK) Top-Bottom**:
 
-<table>
-<tr>
-<td align="center"><strong>Quick</strong></td>
-<td align="center"><strong>Smart (dagre)</strong></td>
-<td align="center"><strong>Advanced (ELK)</strong></td>
-</tr>
-<tr>
-<td><img src="docs/images/arrange_quick.png" width="250" alt="Quick layout result"></td>
-<td><img src="docs/images/arrange_smart.png" width="250" alt="Smart layout result"></td>
-<td><img src="docs/images/arrange_advanced.png" width="250" alt="Advanced layout result"></td>
-</tr>
-</table>
+<img src="docs/images/arrange_simple_advanced_TB.png" width="700" alt="The same workflow arranged with Advanced (ELK), Top-Bottom">
+
+<details>
+<summary>More examples</summary>
+
+**Quick:**
+
+<img src="docs/images/arrange_simple_quick.png" width="700" alt="Simple workflow arranged with Quick">
+
+**Advanced (ELK) Left-Right:**
+
+<img src="docs/images/arrange_simple_advanced_LR.png" width="600" alt="Simple workflow arranged with Advanced (ELK), Left-Right">
+
+**A larger workflow, before:**
+
+<img src="docs/images/arrange_complicated_before.png" width="700" alt="Large workflow with many groups before arranging">
+
+**After, with Smart (dagre) Left-Right:**
+
+<img src="docs/images/arrange_complicated_smart.png" width="700" alt="The large workflow arranged with Smart (dagre), Left-Right">
 
 </details>
 
@@ -325,6 +326,8 @@ Result with **Advanced (ELK)**:
 - Nodes in a group are arranged inside it, then groups are arranged as blocks. Nested groups count as part of their outer group and are fitted around their own nodes afterwards. Empty groups keep their size.
 - Hidden connections (Set/Get nodes, Use Everywhere) count when deciding what comes first, so groups linked only that way still line up in order. When groups feed each other, the side with more connections goes first.
 - A node outside a group that only takes from that group and feeds back into it is placed right next to the group.
+- Loose nodes outside groups (Get nodes, loaders) sit next to what they connect to.
+- Long chains inside a group (a run of LoRA loaders) are folded: short neighbours stack, and in Top-Bottom a very tall chain wraps into rows.
 - Nodes with no connections go in a grid below the graph (or inside their group, if they're in one). With Advanced, groups not connected to anything else go in a grid below too.
 - Arrange moves pinned nodes and groups too, and unpins them.
 - Spacing and group padding are in **Settings > EnhUtils > Arrange**.

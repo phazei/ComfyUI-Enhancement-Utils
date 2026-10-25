@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-enhancement-utils"
 description = "Quality-of-life tools for ComfyUI, built on the V3 API with full subgraph and Nodes 2.0 support: a Flow Visualizer that shows how data flows through a workflow and replays the last run (what ran, was cached, skipped, failed, or changed since), a resource monitor (CPU/RAM/GPU/VRAM/temp/power with history graphs), per-node timing badges, node search with jump-to-node and Follow Execution, graph auto-arrange (Quick/dagre/ELK), and handy nodes: Profiler Timing, Load Image (With Subfolders), Parse JSON, Execution Gate, Play Sound and System Notification. A modern alternative to ComfyUI-Custom-Scripts and Crystools."
-version = "1.9.0"
+version = "1.10.0"
 keywords = [
     "ComfyUI",
     "ComfyUI-Custom-Scripts",
