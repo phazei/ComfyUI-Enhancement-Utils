@@ -2,6 +2,16 @@
 
 Guidelines for working on this project. Read this before making changes.
 
+## Git -- Hands Off
+
+**Never run a git command that changes anything without the user's express permission for that specific action.** That includes `stash`, `add`, `restore`, `checkout`, `reset`, `commit`, `rebase`, `clean`, branch changes -- anything that touches the index, the working tree, refs or history. Read-only commands (`status`, `diff`, `log`, `show`) are fine.
+
+The user reviews work by **staging** files once they've inspected them: anything staged is reviewed, anything unstaged on top of it is new. So:
+
+- Files may become staged while you work. That's the user, not a problem -- don't comment on it, don't unstage, and keep editing the working tree normally.
+- Never do anything that rewrites the index. `git stash` / `stash pop` in particular loses the staged/unstaged split (pop doesn't restore the index without `--index`), merging reviewed and unreviewed changes so the user has to re-review whole files.
+- To compare against an older version of a file (e.g. to check a test fails on the old code), read it with `git show HEAD:path > <temp file>` and load that copy instead -- never swap files in the working tree.
+
 ## Project Goals
 
 This is a curated collection of ComfyUI enhancement utilities. The philosophy:
@@ -238,11 +248,13 @@ To block downstream execution *silently* from a V3 node, the blocker must be a p
 
 ### New Arrange Algorithm
 
-1. Add the layout function in `js/graphArrange.js`
-2. Use the shared helpers: `partitionNodes()`, `resolveGroups()`, `getNodesBounds()`, `layoutDisconnectedNodes()`, `positionSubgraphIO()`, `computeGroupSize()`
-3. Wrap the menu callback with `withPreservedCenter()` to preserve the graph's position
-4. Always call `positionSubgraphIO(graph)` before `graph.setDirtyCanvas(true, true)`
-5. Use `app.canvas.graph` (not `app.graph`) in menu callbacks for subgraph support
+1. Add the layout function in `js/graphArrangeLayout.js` (pure: no `app` import, settings via `getSettings()` fed by `setSettingsSource`); register the menu entry in `js/graphArrange.js`
+2. Use the shared helpers: `partitionNodes()`, `resolveGroups()`, `getNodesBounds()`, `layoutDisconnectedNodes()`, `positionSubgraphIO()`, `computeGroupSize()`, `layoutGroupContents()` / `placeGroup()` (per-group phase), `getLayoutBottom()`
+3. Wrap the menu callback with `withPreservedCenter()`: it unpins every node and group first (arrange ignores pinning and leaves things unpinned), fits nested group frames to their members afterwards (layouts flatten nested groups into the outermost one; an empty nested group moves with it), shifts **all** nodes and groups back to the old node centroid, and re-places the subgraph IO nodes
+4. The layout must place **every** top-level group, including empty ones (keep their current size) and ones whose members are all unconnected (they stay in the group) -- the recentring shifts all groups, so a group the layout skips drifts further on every run. Only ungrouped unconnected nodes go to the grid below (`getLayoutBottom` includes group frames)
+5. Always call `positionSubgraphIO(graph)` before `graph.setDirtyCanvas(true, true)`
+6. Use `app.canvas.graph` (not `app.graph`) in menu callbacks for subgraph support
+7. Re-running an arrange must move nothing (idempotent) -- add the layout to `LAYOUTS` in `tests/graphArrange.test.mjs` (`node tests/graphArrange.test.mjs`), which checks this with pinned items, an empty group, a group of unconnected nodes, a nested group and subgraph IO
 
 ### New Monitor Metric
 

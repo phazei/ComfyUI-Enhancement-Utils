@@ -322,8 +322,9 @@ Result with **Advanced (ELK)**:
 <details>
 <summary>More details</summary>
 
-- Nodes in a group are arranged inside it, then groups are arranged as blocks. Nested groups count as part of their outer group.
-- Nodes with no connections go in a grid below the graph.
+- Nodes in a group are arranged inside it, then groups are arranged as blocks. Nested groups count as part of their outer group and are fitted around their own nodes afterwards. Empty groups keep their size.
+- Nodes with no connections go in a grid below the graph (or inside their group, if they're in one).
+- Arrange moves pinned nodes and groups too, and unpins them.
 - Direction (left-to-right or top-to-bottom), spacing and group padding are in **Settings > EnhUtils > Arrange**.
 
 </details>
@@ -493,7 +494,8 @@ ComfyUI-Enhancement-Utils/
 └── js/                            # Frontend (WEB_DIRECTORY)
     ├── utils.js                   # Shared subgraph / exec-id helpers
     ├── canvasMenu.js              # Shared canvas menu block
-    ├── graphArrange.js            # Graph Arrange
+    ├── graphArrange.js            # Graph Arrange (menu, settings)
+    ├── graphArrangeLayout.js      # Graph Arrange layouts (Quick, dagre, ELK)
     ├── nodeNavigation.js          # Go to node, Follow execution
     ├── nodeSearch.js, nodeSearchMatch.js, nodeSearch.css
     ├── flowGraph.js               # Flow Visualizer model
