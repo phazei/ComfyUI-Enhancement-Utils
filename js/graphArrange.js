@@ -18,7 +18,8 @@
  * - Group padding                   -- affects all group-aware layouts
  *
  * This file only registers the settings and the menu; the layouts live in
- * `graphArrangeLayout.js` (no `app` import, unit-tested under Node).
+ * `graphArrangeLayout.js`, which re-exports the `graphArrange*.js` modules
+ * (no `app` import, unit-tested under Node).
  *
  * Based on pythongosssss/ComfyUI-Custom-Scripts, significantly extended with
  * dagre/ELK integration, group awareness, and layout improvements.

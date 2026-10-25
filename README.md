@@ -497,7 +497,8 @@ ComfyUI-Enhancement-Utils/
     ├── utils.js                   # Shared subgraph / exec-id helpers
     ├── canvasMenu.js              # Shared canvas menu block
     ├── graphArrange.js            # Graph Arrange (menu, settings)
-    ├── graphArrangeLayout.js      # Graph Arrange layouts (Quick, dagre, ELK)
+    ├── graphArrangeLayout.js      # Graph Arrange layouts (re-exports graphArrange*.js:
+    │                              #   Quick, Smart, Advanced + shared / flow / groups)
     ├── nodeNavigation.js          # Go to node, Follow execution
     ├── nodeSearch.js, nodeSearchMatch.js, nodeSearch.css
     ├── flowGraph.js               # Flow Visualizer model

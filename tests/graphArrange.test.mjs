@@ -1,5 +1,6 @@
 /**
- * Tests for js/graphArrangeLayout.js (Quick / Smart (dagre) / Advanced (ELK)).
+ * Tests for the Graph Arrange layouts (Quick / Smart (dagre) / Advanced (ELK)),
+ * imported through js/graphArrangeLayout.js.
  *
  * Runs the real layouts (vendored dagre and elkjs from js/lib/) on small mock
  * graphs and checks the things that broke before: subgraph IO placement,
