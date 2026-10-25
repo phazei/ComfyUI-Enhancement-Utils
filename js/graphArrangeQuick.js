@@ -5,6 +5,7 @@
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
 import { collectHiddenLinks, collectBridgeLinks, computeFlowOrder, chainRanks, rankBlocks } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupContents, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
+import { foldChains } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Float Right Algorithm
@@ -174,9 +175,11 @@ export function arrangeFloatRightGroups(graph) {
 
     for (const group of topLevelGroups) {
         const nodes = groupNodesMap.get(group) || [];
-        groupSizes.set(group, layoutGroupContents(group, nodes, padding,
-            (gc) => floatRightLayout(gc, graph, new Set(gc.map((n) => n.id)),
-                [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)], flow)));
+        groupSizes.set(group, layoutGroupContents(group, nodes, padding, (gc) => {
+            const links = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
+            floatRightLayout(gc, graph, new Set(gc.map((n) => n.id)), links, flow);
+            foldChains(gc, [...Object.values(graph.links || {}), ...links], { horizontal: true, along: MARGIN, across: MARGIN });
+        }));
     }
 
     // ── Phase 2: Position groups as columns ────────────────────────

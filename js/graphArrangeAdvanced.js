@@ -9,6 +9,7 @@ import { TITLE_HEIGHT, getSettings, sizeOf, hasNoDrawnInput, partitionNodes, lay
 import { collectHiddenLinks, collectBridgeLinks, computeFlowOrder, sortChainsByFlow, rankBlocks } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupContents, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
 import { orderLayers, placeWrappedLayers } from "./graphArrangeWrap.js";
+import { foldChains } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ELK (Eclipse Layout Kernel) -- Layered Algorithm with Port Awareness
@@ -189,6 +190,8 @@ export async function arrangeELK(graph, options) {
         const { connected } = partitionNodes(nodes);
         const withBridges = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
         if (!(await runElkLayout(sortChainsByFlow(connected, flow, graph, withBridges), graph, withBridges, settings))) return;
+        foldChains(connected, [...Object.values(graph.links || {}), ...withBridges],
+            { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
         // Connected members are already placed; this adds the grid of
         // unconnected ones and stores the group-relative offsets.
         groupSizes.set(group, layoutGroupContents(group, nodes, padding, () => {}));

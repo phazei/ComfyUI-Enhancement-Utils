@@ -26,6 +26,7 @@
  * - graphArrangeSmart.js    -- Smart (dagre)
  * - graphArrangeAdvanced.js -- Advanced (ELK)
  * - graphArrangeWrap.js     -- Advanced row wrapping
+ * - graphArrangeFold.js     -- folding long chains inside a group
  */
 
 export { DEFAULTS, setSettingsSource, partitionNodes, positionSubgraphIO } from "./graphArrangeShared.js";
@@ -36,3 +37,4 @@ export { arrangeFloatRight, arrangeFloatRightGroups } from "./graphArrangeQuick.
 export { arrangeDagre, arrangeDagreGroups } from "./graphArrangeSmart.js";
 export { arrangeELK } from "./graphArrangeAdvanced.js";
 export { placeWrappedLayers } from "./graphArrangeWrap.js";
+export { breakLines, findChains, FOLD_RATIO } from "./graphArrangeFold.js";

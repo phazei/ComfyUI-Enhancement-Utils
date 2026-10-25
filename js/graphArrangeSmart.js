@@ -8,6 +8,7 @@
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, hasNoDrawnInput, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
 import { collectHiddenLinks, collectBridgeLinks, computeFlowOrder, sortChainsByFlow } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupContents, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
+import { foldChains } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dagre Algorithms
@@ -230,7 +231,9 @@ export function arrangeDagreGroups(graph, options) {
         groupSizes.set(group, layoutGroupContents(group, nodes, padding,
             (gc) => {
                 const links = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
-                return runDagreLayout(sortChainsByFlow(gc, flow, graph, links), graph.links, settings, links);
+                runDagreLayout(sortChainsByFlow(gc, flow, graph, links), graph.links, settings, links);
+                foldChains(gc, [...Object.values(graph.links || {}), ...links],
+                    { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
             }));
     }
 

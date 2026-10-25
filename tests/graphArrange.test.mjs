@@ -25,7 +25,7 @@ vm.runInThisContext(fs.readFileSync(path.join(root, "js/lib/elk.bundled.min.js")
 
 const {
     withPreservedCenter, arrangeFloatRightGroups, arrangeDagreGroups, arrangeDagre, arrangeELK, setSettingsSource, collectBridgeLinks, computeFlowOrder,
-    collectHiddenLinks, placeWrappedLayers,
+    collectHiddenLinks, placeWrappedLayers, breakLines, findChains, FOLD_RATIO,
 } = await import("../js/graphArrangeLayout.js");
 setSettingsSource(() => ({}));
 
@@ -1155,6 +1155,89 @@ for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced 
         check(`${dir}: second run moves nothing`, m.length === 0, m.join(", "));
     }
     setSettingsSource(() => ({}));
+}
+
+// Folding long chains inside a group.
+{
+    console.log("Chain folding");
+    {
+        // Thicknesses 100, 300, 300, 100, 100 with room for two per line:
+        // the 300s pair up, so do the 100s.
+        const items = [100, 300, 300, 100, 100].map((t) => ({ a: 100, t }));
+        const lines = breakLines(items, 250, 50, 80);
+        check("breakLines: similar neighbours share a line", JSON.stringify(lines) === JSON.stringify([[0], [1, 2], [3, 4]]),
+            JSON.stringify(lines));
+        const tight = breakLines(items, 100, 50, 80);
+        check("breakLines: nothing fits together -> one item per line", tight.length === 5, JSON.stringify(tight));
+        const n = (id) => new MockNode(id, "N", 0, 0);
+        const ns = [1, 2, 3, 4, 5].map(n);
+        const l = (a, b) => ({ origin_id: ns[a].id, target_id: ns[b].id });
+        const ids = (cs) => JSON.stringify(cs.map((c) => c.map((x) => x.id)));
+        check("findChains: a path in flow order", ids(findChains(ns.slice(0, 4), [l(2, 3), l(0, 1), l(1, 2), l(1, 2)])) === '[["1","2","3","4"]]');
+        check("findChains: a branch is not a chain", findChains(ns, [l(0, 1), l(1, 2), l(2, 3), l(1, 4)]).length === 0);
+        check("findChains: a loop is not a chain", findChains(ns.slice(0, 3), [l(0, 1), l(1, 2), l(2, 0)]).length === 0);
+        check("findChains: two nodes are too short", findChains(ns.slice(0, 2), [l(0, 1)]).length === 0);
+    }
+
+    /** LoRA-loader style group: Get -> 7 tall loaders -> Set, feeding a second group. */
+    const buildLoraGraph = () => {
+        const graph = new MockGraph();
+        const heights = [1462, 1030, 454, 790, 526, 406, 838];
+        const chain = [graph.add(new MockNode(1, "Get", 0, 0, 230, 90, 0, 1))];
+        heights.forEach((h, i) => chain.push(graph.add(new MockNode(i + 2, "Loader", 300 + i * 700, 0, 560, h, 1, 1))));
+        chain.push(graph.add(new MockNode(20, "Set", 6000, 0, 230, 100, 1, 1)));
+        for (let i = 1; i < chain.length; i++) graph.connect(chain[i - 1], 0, chain[i], 0);
+        const after = graph.add(new MockNode(30, "Sampler", 0, 3000, 300, 200, 1, 0));
+        graph.connect(chain[chain.length - 1], 0, after, 0);
+        graph.add(new MockGroup(1, "LORAS", ...frameAround(chain, 30, 34)));
+        graph.add(new MockGroup(2, "Gen", ...frameAround([after], 30, 34)));
+        for (const g of graph._groups) g.recomputeInsideNodes();
+        return { graph, chain, loras: graph._groups[0] };
+    };
+    /** Pairs of nodes in `ns` whose boxes overlap. */
+    const nodeOverlaps = (ns) => {
+        const bad = [];
+        for (let i = 0; i < ns.length; i++) {
+            for (let j = i + 1; j < ns.length; j++) {
+                const a = ns[i].boundingRect, b = ns[j].boundingRect;
+                if (a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5) {
+                    bad.push(`#${ns[i].id}/#${ns[j].id}`);
+                }
+            }
+        }
+        return bad;
+    };
+    const cases = [
+        ["Quick LR", (g) => arrangeFloatRightGroups(g), "LR"],
+        ["Smart LR", (g) => arrangeDagreGroups(g, { rankdir: "LR" }), "LR"],
+        ["Smart TB", (g) => arrangeDagreGroups(g, { rankdir: "TB" }), "TB"],
+        ["Advanced LR", (g) => arrangeELK(g, { rankdir: "LR" }), "LR"],
+        ["Advanced TB", (g) => arrangeELK(g, { rankdir: "TB" }), "TB"],
+    ];
+    for (const [name, layout, dir] of cases) {
+        const { graph, chain, loras } = buildLoraGraph();
+        await arrange(graph, layout);
+        const [, , w, h] = loras._bounding;
+        if (dir === "LR") {
+            // Tallest node 1462 + title + padding 2x30 + group title 34.
+            check(`${name}: stacking keeps the group as tall as its tallest node`, h <= 1462 + 30 + 60 + 34 + 1, `height ${h}`);
+            const cols = new Set(chain.map((n) => Math.round(n.pos[0]))).size;
+            check(`${name}: short neighbours share columns`, cols < chain.length, `${cols} columns`);
+        } else {
+            check(`${name}: tall chain folds to at most 1:${FOLD_RATIO}`, h / w <= FOLD_RATIO, `${w}x${h}`);
+            const bad = flowErrors(chain.map((n) => ["#" + n.id, n]), { wrap: true });
+            check(`${name}: folded chain reads in rows, left to right`, bad.length === 0, bad.join(", "));
+        }
+        const ov = nodeOverlaps(chain);
+        check(`${name}: chain nodes don't overlap`, ov.length === 0, ov.join(", "));
+        check(`${name}: chain stays in its group`, chain.every((n) => centreIn(n, loras)));
+        const gov = overlaps(graph);
+        check(`${name}: no overlapping groups`, gov.length === 0, gov.join(", "));
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check(`${name}: second run moves nothing`, m.length === 0, m.join(", "));
+    }
 }
 
 // collectHiddenLinks on its own.
