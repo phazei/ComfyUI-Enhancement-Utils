@@ -97,6 +97,19 @@ function sizeOf(node) {
 }
 
 /**
+ * Whether a node has no drawn input link (a source: loaders, Get nodes fed
+ * only by hidden links...). At the top level such a loose node sits at the
+ * end of its step, next to what it feeds -- a step is as long as its longest
+ * block (often a group), and at the start the node's links crossed it all.
+ *
+ * @param {Object} node - LGraphNode.
+ * @returns {boolean} True when no input has a link.
+ */
+function hasNoDrawnInput(node) {
+    return !(node.inputs || []).some((input) => input?.link != null);
+}
+
+/**
  * Partition nodes into connected (has any links) and disconnected (zero links).
  */
 export function partitionNodes(nodes) {
@@ -1531,7 +1544,8 @@ export function arrangeDagreGroups(graph, options) {
     // Weight = number of links (drawn ones count double). The greedy acyclicer
     // reverses the lightest edges of a loop, so a group feeding another
     // through many links stays first (dagre's default ignores weights).
-    for (const { srcTopId, tgtTopId, hidden: isHidden, weight } of buildTopLevelEdges(graph, nodeToGroup, flowNodes, hidden)) {
+    const topEdges = buildTopLevelEdges(graph, nodeToGroup, flowNodes, hidden);
+    for (const { srcTopId, tgtTopId, hidden: isHidden, weight } of topEdges) {
         topG.setEdge(srcTopId, tgtTopId, { weight: weight * (isHidden ? 1 : DRAWN_EDGE_WEIGHT) });
     }
 
@@ -1546,14 +1560,18 @@ export function arrangeDagreGroups(graph, options) {
     // zigzag. Keep its steps and its order inside each step, but start every
     // step at the same edge (top in LR, left in TB) and at the start of the
     // step along the flow: the first block of each step sits on one straight
-    // line from start to finish.
+    // line from start to finish. Loose nodes with no drawn input go to the
+    // end of the step instead (`hasNoDrawnInput`).
     const horizontal = settings.rankdir !== "TB";
     const blocks = [
         ...topLevelGroups.map((group) => {
             const b = blockSizes.get(group);
             return { id: "group_" + group.id, group, w: b.width, h: b.height };
         }),
-        ...flowNodes.map((node) => ({ id: "node_" + node.id, node, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH })),
+        ...flowNodes.map((node) => ({
+            id: "node_" + node.id, node, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH,
+            atEnd: hasNoDrawnInput(node),
+        })),
     ];
     const steps = new Map();
     for (const b of blocks) {
@@ -1563,16 +1581,116 @@ export function arrangeDagreGroups(graph, options) {
         if (!steps.has(key)) steps.set(key, []);
         steps.get(key).push({ ...b, order: horizontal ? dn.y : dn.x });
     }
-    // TB with tbAlign "right": every step ends at the same right edge instead.
-    const crossOf = (st) => st.reduce((s, b) => s + (horizontal ? b.h : b.w) + settings.nodesep, -settings.nodesep);
-    const alignEnd = !horizontal && settings.tbAlign === "right";
-    const endEdge = MARGIN + Math.max(0, ...[...steps.values()].map(crossOf));
-    let u = MARGIN;
-    for (const key of [...steps.keys()].sort((a, b) => a - b)) {
+    const main = (b) => (horizontal ? b.w : b.h);
+    const cross = (b) => (horizontal ? b.h : b.w);
+    const keys = [...steps.keys()].sort((a, b) => a - b);
+    const split = keys.map((key) => {
         const step = steps.get(key).sort((a, b) => a.order - b.order);
-        let v = alignEnd ? endEdge - crossOf(step) : MARGIN, mainMax = 0;
-        for (const b of step) {
-            const [x, y] = horizontal ? [u, v] : [v, u];
+        return { blocks: step.filter((b) => !b.atEnd), srcs: step.filter((b) => b.atEnd) };
+    });
+
+    // Across the flow: regular blocks stacked from the shared edge.
+    // TB with tbAlign "right": every step ends at the same right edge instead.
+    const crossOf = (st) => st.reduce((s, b) => s + cross(b) + settings.nodesep, -settings.nodesep);
+    const alignEnd = !horizontal && settings.tbAlign === "right";
+    const endEdge = MARGIN + Math.max(0, ...split.map((s) => crossOf(s.blocks)));
+    const crossPos = new Map();
+    for (const { blocks: st } of split) {
+        let v = alignEnd ? endEdge - crossOf(st) : MARGIN;
+        for (const b of st) { crossPos.set(b, v); v += cross(b) + settings.nodesep; }
+    }
+
+    // Loose sources line up across the flow with the first node they feed
+    // (in a group: that member), packed so they don't overlap.
+    const blockOfNode = new Map();
+    for (const { blocks: st } of split) {
+        for (const b of st) {
+            if (b.node) blockOfNode.set(b.node.id, b);
+            else for (const n of groupNodesMap.get(b.group) || []) blockOfNode.set(n.id, b);
+        }
+    }
+    const wantedCross = (src) => {
+        let best = Infinity;
+        for (const out of src.node.outputs || []) {
+            for (const lid of out.links || []) {
+                const l = typeof graph.links?.get === "function" ? graph.links.get(lid) : graph.links?.[lid];
+                const t = l && graph.getNodeById(l.target_id);
+                const b = t && blockOfNode.get(t.id);
+                if (!b || !crossPos.has(b)) continue;
+                let c = crossPos.get(b);
+                if (b.group && t._groupOffsetX != null) c += horizontal ? t._groupOffsetY - titleH : t._groupOffsetX;
+                best = Math.min(best, c);
+            }
+        }
+        return best;
+    };
+
+    // Loose tails: an ungrouped node whose forward consumers (later steps) are
+    // all loose tails too -- a chain of loose nodes leading to no group. They
+    // move back into free space instead of waiting behind the longest block
+    // of the previous step; groups never move, so the straight line stays.
+    const stepOf = new Map();
+    split.forEach(({ blocks: st, srcs }, i) => { for (const b of [...st, ...srcs]) stepOf.set(b.id, i); });
+    const succs = new Map(), preds = new Map();
+    for (const { srcTopId: a, tgtTopId: b } of topEdges) {
+        if (!stepOf.has(a) || !stepOf.has(b) || stepOf.get(b) <= stepOf.get(a)) continue;
+        if (!succs.has(a)) succs.set(a, new Set());
+        if (!preds.has(b)) preds.set(b, new Set());
+        succs.get(a).add(b);
+        preds.get(b).add(a);
+    }
+    const tail = new Set();
+    for (let i = split.length - 1; i >= 0; i--) {
+        for (const b of split[i].blocks) {
+            if (b.node && [...(succs.get(b.id) || [])].every((s) => tail.has(s))) tail.add(b.id);
+        }
+    }
+    /** Placed blocks: along-flow end `u1`, across [c0, c1]. */
+    const placed = new Map();
+
+    let u = MARGIN;
+    for (const { blocks: st, srcs } of split) {
+        const start = new Map();
+        for (const b of st) {
+            let s = u;
+            if (tail.has(b.id)) {
+                const c0 = crossPos.get(b), c1 = c0 + cross(b);
+                s = MARGIN;
+                for (const q of placed.values()) if (q.c0 < c1 && c0 < q.c1) s = Math.max(s, q.u1 + settings.ranksep);
+                for (const id of preds.get(b.id) || []) {
+                    const q = placed.get(id);
+                    if (q) s = Math.max(s, q.u1 + settings.ranksep);
+                }
+                s = Math.min(s, u);
+            }
+            start.set(b, s);
+        }
+        const mainMax = Math.max(0, ...st.map((b) => start.get(b) + main(b) - u));
+        // Sources: at the end of the step where that is free, else in a band
+        // of their own right after it (before the step they feed).
+        let band = [];
+        if (srcs.length) {
+            const fallback = st.length ? crossPos.get(st[st.length - 1]) + cross(st[st.length - 1]) + settings.nodesep : MARGIN;
+            const want = srcs.map((b, i) => ({ b, i, c: wantedCross(b) })).map((s) => ({ ...s, c: Number.isFinite(s.c) ? s.c : fallback }));
+            want.sort((p, q) => (p.c - q.c) || (p.i - q.i));
+            let next = -Infinity;
+            for (const s of want) {
+                const c = Math.max(s.c, next);
+                band.push({ b: s.b, c });
+                next = c + cross(s.b) + settings.nodesep;
+            }
+        }
+        const bandT = Math.max(0, ...band.map((s) => main(s.b)));
+        const stepLen = Math.max(mainMax, bandT);
+        // In the step, a source spans [end - its length, end] along the flow.
+        const collides = band.some(({ b, c }) => st.some((r) => {
+            const r0 = crossPos.get(r);
+            return start.get(r) + main(r) > u + stepLen - main(b) && r0 < c + cross(b) && c < r0 + cross(r);
+        }));
+        const bandStart = collides ? u + mainMax + settings.nodesep : null;
+
+        const put = (b, bu, v) => {
+            const [x, y] = horizontal ? [bu, v] : [v, bu];
             if (b.group) {
                 const s = groupSizes.get(b.group);
                 placeGroup(b.group, groupNodesMap.get(b.group) || [], x, y, s);
@@ -1580,10 +1698,19 @@ export function arrangeDagreGroups(graph, options) {
             } else {
                 b.node.pos = [x, y + titleH];
             }
-            v += (horizontal ? b.h : b.w) + settings.nodesep;
-            mainMax = Math.max(mainMax, horizontal ? b.w : b.h);
+        };
+        for (const b of st) {
+            const s = start.get(b), c0 = crossPos.get(b);
+            put(b, s, c0);
+            placed.set(b.id, { u1: s + main(b), c0, c1: c0 + cross(b) });
         }
-        u += mainMax + settings.ranksep;
+        for (const { b, c } of band) {
+            // Ends where the step / band ends, next to what it feeds.
+            const end = collides ? bandStart + bandT : u + stepLen;
+            put(b, end - main(b), c);
+            placed.set(b.id, { u1: end, c0: c, c1: c + cross(b) });
+        }
+        u = (collides ? bandStart + bandT : u + stepLen) + settings.ranksep;
     }
 
     const allPositioned = [
@@ -1769,7 +1896,11 @@ function orderLayers(layers, preds) {
  * Left-to-right: layers are columns, rows stack downwards. Top-to-bottom:
  * layers are rows, bands stack to the right, each starting at the top.
  *
- * @param {Array<Array<{id: string, w: number, h: number}>>} layers - Blocks per layer, in order.
+ * @param {Array<Array<{id: string, w: number, h: number, atEnd?: boolean, chainEnd?: boolean, preds?: Array<string>, feeds?: Array<{id: string, offset: number}>}>>} layers
+ *   Blocks per layer, in order. `atEnd` (loose sources) go to the end of their
+ *   step, across the flow level with the block they `feeds`. `chainEnd` blocks
+ *   (no forward consumer) move back along the flow into free space, after
+ *   whatever is in their way across the flow and after their `preds`.
  * @param {{horizontal: boolean, layerGap: number, itemGap: number, rowGap: number, aspect: number}} opts
  * @returns {{ pos: Map<string, {x: number, y: number}>, width: number, height: number, rows: number }}
  */
@@ -1777,28 +1908,62 @@ export function placeWrappedLayers(layers, opts) {
     const { horizontal, layerGap, itemGap, rowGap, aspect } = opts;
     const main = (b) => (horizontal ? b.w : b.h);
     const cross = (b) => (horizontal ? b.h : b.w);
-    const lm = layers.map((l) => Math.max(0, ...l.map(main)));
-    const lc = layers.map((l) => l.reduce((s, b) => s + cross(b), 0) + itemGap * Math.max(0, l.length - 1));
+    /** A step's blocks with their length along the flow (`m`) and across it (`c`). */
+    const part = (blocks) => ({
+        blocks,
+        m: Math.max(0, ...blocks.map(main)),
+        c: blocks.reduce((s, b) => s + cross(b), 0) + itemGap * Math.max(0, blocks.length - 1),
+    });
+    const parts = layers.map(part);
+    const rowMain = (row) => row.reduce((s, p) => s + p.m, 0) + layerGap * Math.max(0, row.length - 1);
 
-    /** Split layers greedily into rows no longer than `limit`. */
+    /**
+     * Split layers greedily into rows no longer than `limit`. The loose
+     * sources (`atEnd`) of a row's last step move to the start of the next
+     * row as a step of their own: they feed the step after them, and left
+     * behind their links ran back across the whole row.
+     */
     const pack = (limit) => {
         const rows = [];
         let row = [], len = 0;
-        lm.forEach((m, i) => {
-            const add = row.length ? layerGap + m : m;
-            if (row.length && len + add > limit + 1e-6) { rows.push(row); row = []; len = 0; }
-            len += row.length ? layerGap + m : m;
-            row.push(i);
-        });
+        for (let p of parts) {
+            const add = row.length ? layerGap + p.m : p.m;
+            if (row.length && len + add > limit + 1e-6) {
+                const last = row[row.length - 1];
+                const src = last.blocks.filter((b) => b.atEnd);
+                const rest = last.blocks.filter((b) => !b.atEnd);
+                let carry = [];
+                if (src.length && (rest.length || row.length > 1)) {
+                    row.pop();
+                    if (rest.length) row.push(part(rest));
+                    carry = [part(src)];
+                }
+                // The mirror case: loose sinks (`sink`: no drawn output) of the
+                // step that starts the next row, fed only from this row, stay
+                // at the end of this row as a step of their own.
+                const ids = new Set(row.flatMap((q) => q.blocks.map((b) => b.id)));
+                const back = p.blocks.filter((b) => b.sink && b.fedBy?.length && b.fedBy.every((f) => ids.has(f.id)));
+                if (back.length) {
+                    row.push({ ...part(back), back: true });
+                    const keep = p.blocks.filter((b) => !back.includes(b));
+                    p = keep.length ? part(keep) : null;
+                }
+                rows.push(row);
+                row = carry;
+                len = rowMain(carry);
+                if (!p) continue;
+            }
+            len += row.length ? layerGap + p.m : p.m;
+            row.push(p);
+        }
         if (row.length) rows.push(row);
         return rows;
     };
-    const rowMain = (row) => row.reduce((s, i) => s + lm[i], 0) + layerGap * (row.length - 1);
-    const rowCross = (row) => Math.max(0, ...row.map((i) => lc[i]));
+    const rowCross = (row) => Math.max(0, ...row.map((p) => p.c));
 
     let best = null;
-    const total = rowMain(lm.map((_, i) => i));
-    const longest = Math.max(0, ...lm);
+    const total = rowMain(parts);
+    const longest = Math.max(0, ...parts.map((p) => p.m));
     for (let r = 1; r <= layers.length; r++) {
         // Shortest row length that fits in r rows.
         let lo = longest, hi = Math.max(total, longest);
@@ -1817,21 +1982,122 @@ export function placeWrappedLayers(layers, opts) {
     if (!best) return { pos: new Map(), width: 0, height: 0, rows: 0 };
 
     const pos = new Map();
-    let v = 0;
+    const set = (b, u, c) => pos.set(b.id, horizontal ? { x: u, y: c } : { x: c, y: u });
+    let v = 0, mainExt = 0, crossEnd = 0;
     for (const row of best.rows) {
-        let u = 0;
-        for (const li of row) {
+        // Regular blocks: stacked from the row's edge, at the start of their step.
+        // A step without groups keeps its sources in the step's own order
+        // (`orderLayers` already puts them next to what they feed, and the
+        // step stays one even line); only next to a group, which the order
+        // can't account for, do they move to line up with their consumers.
+        // A step of nothing but sources (e.g. carried to the start of a row)
+        // has no order to keep.
+        const inline = (p) => !p.blocks.some((b) => b.group) && p.blocks.some((b) => !b.atEnd);
+        const crossAt = new Map();
+        for (const p of row) {
             let c = v;
-            for (const b of layers[li]) {
-                const bu = u; // Aligned to the start of the step (left in LR, top in TB).
-                pos.set(b.id, horizontal ? { x: bu, y: c } : { x: c, y: bu });
+            if (p.back) continue;
+            for (const b of p.blocks) {
+                if (b.atEnd && !inline(p)) continue;
+                crossAt.set(b.id, c);
                 c += cross(b) + itemGap;
             }
-            u += lm[li] + layerGap;
         }
-        v += rowCross(row) + rowGap;
+        let u = 0, rowEnd = v;
+        /** Blocks placed in this row: along-flow span [u0, u1], across [c0, c1]. */
+        const placed = new Map();
+        for (const p of row) {
+            if (p.back) {
+                // Pulled-back sinks: level with the first block feeding them
+                // (plus the feeding node's offset inside it), packed.
+                const want = p.blocks.map((b, i) => {
+                    const cs = b.fedBy.filter((f) => placed.has(f.id)).map((f) => placed.get(f.id).c0 + (f.offset || 0));
+                    return { b, i, c: cs.length ? Math.min(...cs) : v };
+                }).sort((a, b) => (a.c - b.c) || (a.i - b.i));
+                let next = -Infinity;
+                for (const { b, c: want0 } of want) {
+                    const c = Math.max(want0, next);
+                    set(b, u, c);
+                    placed.set(b.id, { u0: u, u1: u + main(b), c0: c, c1: c + cross(b) });
+                    rowEnd = Math.max(rowEnd, c + cross(b));
+                    next = c + cross(b) + itemGap;
+                }
+                mainExt = Math.max(mainExt, u + p.m);
+                u += p.m + layerGap;
+                continue;
+            }
+            const regs = p.blocks.filter((b) => !b.atEnd);
+            const srcs = p.blocks.filter((b) => b.atEnd);
+            const regStart = new Map();
+            for (const b of regs) {
+                const c0 = crossAt.get(b.id), c1 = c0 + cross(b);
+                let s = u;
+                if (b.chainEnd) {
+                    // Nothing comes after it: move back into free space, right
+                    // after whatever is in its way across the flow and after the
+                    // blocks feeding it (a step is as long as its longest block,
+                    // so behind a tall group it sat far from everything).
+                    s = 0;
+                    for (const q of placed.values()) {
+                        if (q.c0 < c1 && c0 < q.c1) s = Math.max(s, q.u1 + layerGap);
+                    }
+                    for (const id of b.preds || []) {
+                        const q = placed.get(id);
+                        if (q) s = Math.max(s, q.u1 + layerGap);
+                    }
+                    s = Math.min(s, u);
+                }
+                regStart.set(b.id, s);
+                set(b, s, c0);
+                rowEnd = Math.max(rowEnd, c1);
+            }
+            const mReg = Math.max(0, ...regs.map((b) => regStart.get(b.id) + main(b) - u));
+            // Loose sources: across the flow level with the first block they
+            // feed in this row (`feeds`: block id + offset of the fed node
+            // inside it), packed without overlap; others after the regular blocks.
+            const lastReg = regs[regs.length - 1];
+            const fallback = lastReg ? crossAt.get(lastReg.id) + cross(lastReg) + itemGap : v;
+            const band = [];
+            if (inline(p)) {
+                for (const b of srcs) band.push({ b, c: crossAt.get(b.id) });
+            } else {
+                const want = srcs.map((b, i) => {
+                    const cs = (b.feeds || []).filter((f) => crossAt.has(f.id)).map((f) => crossAt.get(f.id) + (f.offset || 0));
+                    return { b, i, c: cs.length ? Math.min(...cs) : fallback };
+                }).sort((p1, p2) => (p1.c - p2.c) || (p1.i - p2.i));
+                let next = -Infinity;
+                for (const s of want) {
+                    const c = Math.max(s.c, next);
+                    band.push({ b: s.b, c });
+                    next = c + cross(s.b) + itemGap;
+                }
+            }
+            const bandT = Math.max(0, ...srcs.map(main));
+            const stepLen = Math.max(mReg, bandT);
+            // At the end of the step where that is free, else in a thin band
+            // of their own right after it.
+            const collides = band.some(({ b, c }) => regs.some((r) => {
+                const r0 = crossAt.get(r.id);
+                return regStart.get(r.id) + main(r) > u + stepLen - main(b) && r0 < c + cross(b) && c < r0 + cross(r);
+            }));
+            const end = collides ? u + mReg + itemGap + bandT : u + stepLen;
+            for (const b of regs) {
+                const s = regStart.get(b.id), c0 = crossAt.get(b.id);
+                placed.set(b.id, { u0: s, u1: s + main(b), c0, c1: c0 + cross(b) });
+            }
+            for (const { b, c } of band) {
+                set(b, end - main(b), c);
+                placed.set(b.id, { u0: end - main(b), u1: end, c0: c, c1: c + cross(b) });
+                rowEnd = Math.max(rowEnd, c + cross(b));
+            }
+            mainExt = Math.max(mainExt, end);
+            u = end + layerGap;
+        }
+        crossEnd = rowEnd;
+        v = rowEnd + rowGap;
     }
-    return { pos, width: best.w, height: best.h, rows: best.rows.length };
+    const [width, height] = horizontal ? [mainExt, crossEnd] : [crossEnd, mainExt];
+    return { pos, width, height, rows: best.rows.length };
 }
 
 /**
@@ -1902,7 +2168,56 @@ export async function arrangeELK(graph, options) {
         blocks.set("group_" + group.id, { id: "group_" + group.id, group, w: s.width, h: s.height });
     }
     for (const node of flowNodes) {
-        blocks.set("node_" + node.id, { id: "node_" + node.id, node, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH });
+        blocks.set("node_" + node.id, {
+            id: "node_" + node.id, node, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH,
+            atEnd: hasNoDrawnInput(node),
+        });
+    }
+    // Loose sources: which blocks they feed through drawn links, and where the
+    // fed node sits across the flow inside that block (group offset).
+    const horizontalTop = settings.rankdir !== "TB";
+    for (const node of flowNodes) {
+        const b = blocks.get("node_" + node.id);
+        if (!b.atEnd) continue;
+        b.feeds = [];
+        for (const out of node.outputs || []) {
+            for (const lid of out.links || []) {
+                const l = typeof graph.links?.get === "function" ? graph.links.get(lid) : graph.links?.[lid];
+                const t = l && graph.getNodeById(l.target_id);
+                if (!t) continue;
+                const group = nodeToGroup.get(t.id);
+                if (group && topLevelGroups.includes(group) && t._groupOffsetX != null) {
+                    b.feeds.push({ id: "group_" + group.id, offset: horizontalTop ? t._groupOffsetY - titleH : t._groupOffsetX });
+                } else if (!group) {
+                    b.feeds.push({ id: "node_" + t.id, offset: 0 });
+                }
+            }
+        }
+    }
+    // Loose sinks (drawn inputs, no drawn output, e.g. Set nodes): which blocks
+    // feed them through drawn links, and where the feeding node sits across
+    // the flow inside that block.
+    const linkOf = (lid) => (typeof graph.links?.get === "function" ? graph.links.get(lid) : graph.links?.[lid]);
+    for (const node of flowNodes) {
+        const b = blocks.get("node_" + node.id);
+        const drawnOut = (node.outputs || []).some((o) => o?.links?.length > 0);
+        const ins = (node.inputs || []).filter((i) => i?.link != null);
+        if (drawnOut || ins.length === 0) continue;
+        b.sink = true;
+        b.fedBy = [];
+        for (const input of ins) {
+            const l = linkOf(input.link);
+            const s = l && graph.getNodeById(l.origin_id);
+            if (!s) continue;
+            const group = nodeToGroup.get(s.id);
+            if (group && topLevelGroups.includes(group) && s._groupOffsetX != null) {
+                b.fedBy.push({ id: "group_" + group.id, offset: horizontalTop ? s._groupOffsetY - titleH : s._groupOffsetX });
+            } else if (!group) {
+                b.fedBy.push({ id: "node_" + s.id, offset: 0 });
+            } else {
+                b.fedBy.push({ id: "?" }); // Fed from somewhere not placed as a block: never pulled back.
+            }
+        }
     }
     const edges = buildTopLevelEdges(graph, nodeToGroup, flowNodes, hidden);
     const linked = new Set(edges.flatMap((e) => [e.srcTopId, e.tgtTopId]));
@@ -1926,6 +2241,19 @@ export async function arrangeELK(graph, options) {
         const layers = [];
         for (const id of flowIds) (layers[ranked.level.get(id)] ??= []).push(id);
         const ordered = orderLayers(layers.filter(Boolean), ranked.preds);
+        // Loose tails may move back into free space: an ungrouped node whose
+        // forward consumers are all loose tails too (none = end of a chain).
+        // Groups never move, so the steps of the groups stay aligned.
+        const succs = new Map(flowIds.map((id) => [id, []]));
+        for (const [id, ps] of ranked.preds) for (const p of ps) succs.get(p)?.push(id);
+        const byLevel = [...flowIds].sort((a, b) => ranked.level.get(b) - ranked.level.get(a));
+        const tail = new Set();
+        for (const id of byLevel) {
+            const b = blocks.get(id);
+            b.preds = ranked.preds.get(id) || [];
+            if (b.node && succs.get(id).every((s) => tail.has(s))) tail.add(id);
+            b.chainEnd = tail.has(id);
+        }
         const wrapped = placeWrappedLayers(ordered.map((l) => l.map((id) => blocks.get(id))), {
             horizontal: settings.rankdir !== "TB",
             layerGap: settings.ranksep,

@@ -24,7 +24,7 @@ vm.runInThisContext(fs.readFileSync(path.join(root, "js/lib/elk.bundled.min.js")
 
 const {
     withPreservedCenter, arrangeFloatRightGroups, arrangeDagreGroups, arrangeDagre, arrangeELK, setSettingsSource, collectBridgeLinks, computeFlowOrder,
-    collectHiddenLinks,
+    collectHiddenLinks, placeWrappedLayers,
 } = await import("../js/graphArrangeLayout.js");
 setSettingsSource(() => ({}));
 
@@ -935,6 +935,223 @@ for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced 
         const [, W, T] = graph._groups;
         const k = dir === "LR" ? 0 : 1;
         check(`${dir}: groups sharing a step start at the same edge`, Math.abs(W.pos[k] - T.pos[k]) < 0.5, `${W.pos[k]} vs ${T.pos[k]}`);
+    }
+    setSettingsSource(() => ({}));
+}
+
+// Smart / Advanced: a loose node with no drawn input sits at the end of its
+// step (next to what it feeds), not at the start of a long group.
+for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced (ELK)", arrangeELK]]) {
+    console.log(name + " loose sources at the step end");
+    for (const dir of ["LR", "TB"]) {
+        setSettingsSource(() => ({ rankdir: dir }));
+        // A -> W (long along the flow) -> C; loose L (no inputs) -> C.
+        const graph = new MockGraph();
+        const a = graph.add(new MockNode(1, "N", 0, 0, 200, 100, 0, 1));
+        const w = graph.add(new MockNode(2, "N", 500, 0, 900, 900, 1, 1));
+        const c = graph.add(new MockNode(3, "N", 2000, 0, 200, 100, 2, 0));
+        const l = graph.add(new MockNode(4, "N", 0, 2000, 150, 60, 0, 1));
+        graph.connect(a, 0, w, 0);
+        graph.connect(w, 0, c, 0);
+        graph.connect(l, 0, c, 1);
+        for (const [i, n] of [[1, a], [2, w], [3, c]]) graph.add(new MockGroup(i, "G" + i, ...frameAround([n], 30, 34)));
+        for (const g of graph._groups) g.recomputeInsideNodes();
+        await arrange(graph, layout);
+        const C = graph._groups[2];
+        const k = dir === "LR" ? 0 : 1;
+        const lr = l.boundingRect;
+        // Right before what it feeds: at the end of the long group's step, or
+        // (a wrapped row) at the start of the row that holds what it feeds.
+        const gap = C.pos[k] - (lr[k] + lr[k + 2]);
+        check(`${dir}: loose source ends right before what it feeds`, gap >= 0 && gap <= 200, `gap ${gap}`);
+        const ov = overlaps(graph);
+        check(`${dir}: no overlaps`, ov.length === 0, ov.join(", "));
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check(`${dir}: second run moves nothing`, m.length === 0, m.join(", "));
+    }
+    setSettingsSource(() => ({}));
+}
+
+// Smart: loose sources also line up across the flow with what they feed
+// (in TB they sat beside the big group of their step, far from it).
+for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced (ELK)", arrangeELK]]) {
+    console.log(name + " loose sources across the flow");
+    for (const dir of ["LR", "TB"]) {
+        setSettingsSource(() => ({ rankdir: dir }));
+        // A -> W (big) -> C1 (group) ; W -> C2 (loose) ; L1, L2 (loose, no inputs) -> C2.
+        const graph = new MockGraph();
+        const a = graph.add(new MockNode(1, "N", 0, 0, 200, 100, 0, 1));
+        const w = graph.add(new MockNode(2, "N", 500, 0, 900, 900, 1, 2));
+        const c1 = graph.add(new MockNode(3, "N", 2000, 0, 700, 700, 1, 0));
+        const c2 = graph.add(new MockNode(4, "N", 2000, 900, 200, 100, 3, 0));
+        const l1 = graph.add(new MockNode(5, "N", 0, 2000, 150, 0, 0, 1));
+        const l2 = graph.add(new MockNode(6, "N", 0, 2100, 150, 0, 0, 1));
+        graph.connect(a, 0, w, 0);
+        graph.connect(w, 0, c1, 0);
+        graph.connect(w, 1, c2, 0);
+        graph.connect(l1, 0, c2, 1);
+        graph.connect(l2, 0, c2, 2);
+        for (const [i, n] of [[1, a], [2, w], [3, c1]]) graph.add(new MockGroup(i, "G" + i, ...frameAround([n], 30, 34)));
+        for (const g of graph._groups) g.recomputeInsideNodes();
+        await arrange(graph, layout);
+        const k = dir === "LR" ? 1 : 0; // across the flow
+        const c2r = c2.boundingRect;
+        const near = [l1, l2].every((l) => {
+            const r = l.boundingRect;
+            return r[k] < c2r[k] + c2r[k + 2] + 100 && r[k] + r[k + 2] > c2r[k] - 100;
+        });
+        check(`${dir}: sources line up with the node they feed`, near,
+            `C2 ${c2r.map(Math.round)}, L1 ${l1.boundingRect.map(Math.round)}, L2 ${l2.boundingRect.map(Math.round)}`);
+        const ov = overlaps(graph);
+        check(`${dir}: no overlaps`, ov.length === 0, ov.join(", "));
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check(`${dir}: second run moves nothing`, m.length === 0, m.join(", "));
+    }
+    setSettingsSource(() => ({}));
+}
+
+// Advanced: a layer of only loose sources never ends a wrapped row -- it goes
+// to the start of the next row, next to the layer it feeds.
+{
+    console.log("Advanced (ELK) wrap keeps sources with their consumers");
+    for (const horizontal of [true, false]) {
+        // mixed: the sources share their step with a regular block.
+        for (const mixed of [false, true]) {
+            const label = `${horizontal ? "LR" : "TB"}${mixed ? " (step shared with a regular block)" : ""}`;
+            const big = (id) => ({ id, w: 1000, h: 1000 });
+            let wrapped = 0, bad = 0;
+            // Put the source step at every position; some of them land on a row break.
+            for (let at = 1; at < 8; at++) {
+                const layers = Array.from({ length: 8 }, (_, i) => [big("b" + i)]);
+                const step = [{ id: "s", w: 120, h: 30, atEnd: true }, { id: "s2", w: 100, h: 30, atEnd: true }];
+                if (mixed) step.unshift({ id: "r", w: 300, h: 300 });
+                layers.splice(at, 0, step);
+                const r = placeWrappedLayers(layers, { horizontal, layerGap: 100, itemGap: 50, rowGap: 100, aspect: 16 / 9 });
+                if (r.rows > 1) wrapped++;
+                const row = (p) => (horizontal ? p.y : p.x);
+                const along = (p) => (horizontal ? p.x : p.y);
+                const next = r.pos.get("b" + at);
+                for (const id of ["s", "s2"]) {
+                    const s = r.pos.get(id);
+                    // Same row as what it feeds = its row starts at or before, and it comes first.
+                    if (row(s) < row(next) || along(s) > along(next)) {
+                        bad++;
+                        check(`${label}: source at ${at} in the row of what it feeds`, false, `${id} ${JSON.stringify(s)}, next ${JSON.stringify(next)}`);
+                    }
+                }
+                // No two blocks overlap.
+                const all = layers.flat().map((b) => ({ ...b, ...r.pos.get(b.id) }));
+                for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+                    const a = all[i], b = all[j];
+                    if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) {
+                        bad++;
+                        check(`${label}: source at ${at}: ${a.id} / ${b.id} don't overlap`, false);
+                    }
+                }
+            }
+            check(`${label}: sources stay with what they feed, no overlaps`, bad === 0 && wrapped > 0, `wrapped ${wrapped}`);
+        }
+    }
+}
+
+// Advanced: the mirror case -- loose sinks fed from the end of a row don't
+// start the next row; they stay at the end of the row that feeds them.
+{
+    console.log("Advanced (ELK) wrap keeps sinks with what feeds them");
+    for (const horizontal of [true, false]) {
+        const label = horizontal ? "LR" : "TB";
+        const big = (id) => ({ id, w: 1000, h: 1000 });
+        let wrapped = 0, bad = 0;
+        for (let at = 1; at < 8; at++) {
+            const layers = Array.from({ length: 8 }, (_, i) => [big("b" + i)]);
+            // Sink fed by b(at-1), sharing its step with a regular block.
+            layers.splice(at, 0, [{ id: "r", w: 1000, h: 1000 }, { id: "k", w: 120, h: 30, sink: true, fedBy: [{ id: "b" + (at - 1), offset: 0 }] }]);
+            const r = placeWrappedLayers(layers, { horizontal, layerGap: 100, itemGap: 50, rowGap: 100, aspect: 16 / 9 });
+            if (r.rows > 1) wrapped++;
+            const row = (p) => (horizontal ? p.y : p.x);
+            const along = (p) => (horizontal ? p.x : p.y);
+            const k = r.pos.get("k"), feeder = r.pos.get("b" + (at - 1));
+            // Same row = within the feeder's row band (rows up to 1080 deep), later along it.
+            if (row(k) < row(feeder) || row(k) >= row(feeder) + 1080 || along(k) < along(feeder)) {
+                bad++;
+                check(`${label}: sink at ${at} in the row of what feeds it`, false, `k ${JSON.stringify(k)}, feeder ${JSON.stringify(feeder)}`);
+            }
+            const all = layers.flat().map((b) => ({ ...b, ...r.pos.get(b.id) }));
+            for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+                const a = all[i], b = all[j];
+                if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) {
+                    bad++;
+                    check(`${label}: sink at ${at}: ${a.id} / ${b.id} don't overlap`, false);
+                }
+            }
+        }
+        check(`${label}: sinks stay with what feeds them, no overlaps`, bad === 0 && wrapped > 0, `wrapped ${wrapped}`);
+    }
+}
+
+// Advanced: a chain end (nothing after it) moves back into free space instead
+// of waiting behind the longest block of the previous step.
+{
+    console.log("Advanced (ELK) chain ends move into free space");
+    for (const horizontal of [true, false]) {
+        // [length along the flow, size across]
+        const blk = (id, m, c, extra = {}) => ({ id, ...(horizontal ? { w: m, h: c } : { w: c, h: m }), ...extra });
+        const layers = [
+            [blk("T", 1000, 200), blk("S", 100, 200)],       // tall T, short S
+            [blk("X", 200, 200)],
+            [blk("F", 100, 200), blk("E", 100, 100, { chainEnd: true, preds: ["S"] })],
+        ];
+        const r = placeWrappedLayers(layers, { horizontal, layerGap: 100, itemGap: 50, rowGap: 100, aspect: horizontal ? 100 : 0.01 });
+        const along = (id) => (horizontal ? r.pos.get(id).x : r.pos.get(id).y);
+        const label = horizontal ? "LR" : "TB";
+        check(`${label}: chain end starts right after what feeds it`, along("E") === 200, `E at ${along("E")}`);
+        check(`${label}: other blocks keep their step`, along("F") === 1400, `F at ${along("F")}`);
+        const all = layers.flat().map((b) => ({ ...b, ...r.pos.get(b.id) }));
+        const ov = [];
+        for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+            const a = all[i], b = all[j];
+            if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) ov.push(a.id + "/" + b.id);
+        }
+        check(`${label}: no overlaps`, ov.length === 0, ov.join(", "));
+    }
+}
+
+// Advanced end to end: a loose tail of several nodes after a short group moves
+// back next to it, instead of waiting behind a tall group in the same step.
+for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced (ELK)", arrangeELK]]) {
+    console.log(name + " loose tail moves into free space");
+    for (const dir of ["LR", "TB"]) {
+        setSettingsSource(() => ({ rankdir: dir }));
+        const graph = new MockGraph();
+        const src = graph.add(new MockNode(1, "N", 0, 0, 200, 100, 0, 2));
+        const tall = graph.add(new MockNode(2, "N", 500, 0, 2000, 2000, 1, 0));
+        const short = graph.add(new MockNode(3, "N", 500, 3000, 200, 100, 1, 1));
+        const t = [4, 5, 6].map((id, i) => graph.add(new MockNode(id, "N", 4000 + i * 300, 4000, 200, 100, 1, 1)));
+        graph.connect(src, 0, tall, 0);
+        graph.connect(src, 1, short, 0);
+        graph.connect(short, 0, t[0], 0);
+        graph.connect(t[0], 0, t[1], 0);
+        graph.connect(t[1], 0, t[2], 0);
+        // Short group listed first: it comes first in its step, the tail level with it.
+        for (const [i, n] of [[1, src], [2, short], [3, tall]]) graph.add(new MockGroup(i, "G" + i, ...frameAround([n], 30, 34)));
+        for (const g of graph._groups) g.recomputeInsideNodes();
+        await arrange(graph, layout);
+        const k = dir === "LR" ? 0 : 1;
+        const T = graph._groups[2];
+        const tallEnd = T.pos[k] + T.size[k];
+        check(`${dir}: tail starts before the tall group ends`, t[0].boundingRect[k] < tallEnd,
+            `tail ${t[0].boundingRect[k]}, tall group ends ${tallEnd}`);
+        check(`${dir}: tail keeps its order`, t.every((n, i) => i === 0 || n.boundingRect[k] > t[i - 1].boundingRect[k]));
+        const ov = overlaps(graph);
+        check(`${dir}: no overlaps`, ov.length === 0, ov.join(", "));
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check(`${dir}: second run moves nothing`, m.length === 0, m.join(", "));
     }
     setSettingsSource(() => ({}));
 }
