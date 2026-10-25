@@ -6,11 +6,13 @@
  *                               Group-aware: respects groups when present.
  * 2. Smart (dagre)           -- Sugiyama layout via dagre.js.
  *                               Group-aware: per-group + inter-group layout.
- * 3. Advanced (ELK)          -- Port-aware Sugiyama via ELK with native hierarchy.
- *                               Auto-detects groups, models input/output slots as ports.
+ * 3. Advanced (ELK)          -- Port-aware Sugiyama via ELK inside each group; groups
+ *                               placed in rows wrapped like text, aiming at 16:9.
+ *
+ * Smart and Advanced each get a Left-Right and a Top-Bottom menu entry
+ * (the direction is picked per run, not a setting).
  *
  * Settings (configurable via ComfyUI Settings panel):
- * - Flow direction (LR or TB)       -- affects Dagre and ELK
  * - Node spacing                    -- affects Dagre and ELK
  * - Rank spacing                    -- affects Dagre and ELK
  * - Group padding                   -- affects all group-aware layouts
@@ -38,7 +40,6 @@ import {
 // Settings
 // ═══════════════════════════════════════════════════════════════════════════
 
-const SETTING_RANKDIR       = "EnhUtils.Arrange.RankDir";
 const SETTING_NODESEP       = "EnhUtils.Arrange.NodeSep";
 const SETTING_RANKSEP       = "EnhUtils.Arrange.RankSep";
 const SETTING_GROUP_PADDING = "EnhUtils.Arrange.GroupPadding";
@@ -54,13 +55,30 @@ function getSettings() {
         }
     };
     return {
-        rankdir:      get(SETTING_RANKDIR, DEFAULTS.rankdir),
         nodesep:      get(SETTING_NODESEP, DEFAULTS.nodesep),
         ranksep:      get(SETTING_RANKSEP, DEFAULTS.ranksep),
         groupPadding: get(SETTING_GROUP_PADDING, DEFAULTS.groupPadding),
     };
 }
 setSettingsSource(getSettings);
+
+/** Flow directions offered per layout: [menu suffix, rankdir]. */
+const DIRECTIONS = [["Left-Right", "LR"], ["Top-Bottom", "TB"]];
+
+/**
+ * Build one Arrange menu entry per flow direction for a layout.
+ *
+ * @param {string} label - Layout label, e.g. "Smart (dagre)".
+ * @param {function(Object, {rankdir: string}): (void|Promise<void>)} layout - Layout function.
+ * @returns {Array<Object>} Menu entries.
+ */
+function directionEntries(label, layout) {
+    return DIRECTIONS.map(([suffix, rankdir]) => ({
+        content: `${label} ${suffix}`,
+        callback: () => withPreservedCenter(app.canvas.graph,
+            () => layout(app.canvas.graph, { rankdir })),
+    }));
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Extension Registration
@@ -71,15 +89,6 @@ app.registerExtension({
 
     setup() {
         // ── Settings ───────────────────────────────────────────────
-
-        app.ui.settings.addSetting({
-            id: SETTING_RANKDIR,
-            name: "Graph Arrange - Flow direction",
-            type: "combo",
-            defaultValue: DEFAULTS.rankdir,
-            options: ["LR", "TB"],
-            tooltip: "LR = Left-to-Right, TB = Top-to-Bottom. Affects Dagre and ELK layouts.",
-        });
 
         app.ui.settings.addSetting({
             id: SETTING_NODESEP,
@@ -126,16 +135,8 @@ app.registerExtension({
                         callback: () => withPreservedCenter(app.canvas.graph,
                             () => arrangeFloatRightGroups(app.canvas.graph)),
                     },
-                    {
-                        content: "Smart (dagre)",
-                        callback: () => withPreservedCenter(app.canvas.graph,
-                            () => arrangeDagreGroups(app.canvas.graph)),
-                    },
-                    {
-                        content: "Advanced (ELK)",
-                        callback: () => withPreservedCenter(app.canvas.graph,
-                            () => arrangeELK(app.canvas.graph)),
-                    },
+                    ...directionEntries("Smart (dagre)", arrangeDagreGroups),
+                    ...directionEntries("Advanced (ELK)", arrangeELK),
                 ],
             },
         }]);

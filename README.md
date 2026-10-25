@@ -287,9 +287,9 @@ Turn it on and the canvas follows the running node as the workflow runs, opening
 | Option | |
 |--------|---|
 | **Center Graph** | Moves everything back to the middle. Handy when you're lost in empty space. |
-| **Quick** | Fast column layout |
-| **Smart (dagre)** | Good balance of quality and speed |
-| **Advanced (ELK)** | Best layout, fewest crossing links |
+| **Quick** | Columns: inputs on the left, narrowing towards the output |
+| **Smart (dagre)** | One straight line from start to finish (Left-Right or Top-Bottom) |
+| **Advanced (ELK)** | Compact: the flow wraps into rows, like text, to fit a 16:9 shape (Left-Right or Top-Bottom) |
 
 Result with **Advanced (ELK)**:
 
@@ -323,9 +323,11 @@ Result with **Advanced (ELK)**:
 <summary>More details</summary>
 
 - Nodes in a group are arranged inside it, then groups are arranged as blocks. Nested groups count as part of their outer group and are fitted around their own nodes afterwards. Empty groups keep their size.
-- Nodes with no connections go in a grid below the graph (or inside their group, if they're in one).
+- Hidden connections (Set/Get nodes, Use Everywhere) count when deciding what comes first, so groups linked only that way still line up in order. When groups feed each other, the side with more connections goes first.
+- A node outside a group that only takes from that group and feeds back into it is placed right next to the group.
+- Nodes with no connections go in a grid below the graph (or inside their group, if they're in one). With Advanced, groups not connected to anything else go in a grid below too.
 - Arrange moves pinned nodes and groups too, and unpins them.
-- Direction (left-to-right or top-to-bottom), spacing and group padding are in **Settings > EnhUtils > Arrange**.
+- Spacing and group padding are in **Settings > EnhUtils > Arrange**.
 
 </details>
 

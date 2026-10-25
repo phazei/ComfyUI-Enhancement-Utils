@@ -10,15 +10,26 @@
  * Layouts:
  * 1. Quick (column aligned)  -- `arrangeFloatRightGroups`: right-aligned columns with barycenter sorting.
  * 2. Smart (dagre)           -- `arrangeDagreGroups`: per-group + inter-group dagre layout.
- * 3. Advanced (ELK)          -- `arrangeELK`: port-aware layered layout, groups as ELK parents.
+ * 3. Advanced (ELK)          -- `arrangeELK`: ELK inside each group, groups placed in wrapped rows (16:9).
+ * Dagre and ELK take an optional `{ rankdir: "LR" | "TB" }` (one menu entry per direction).
  * Menu callbacks wrap them in `withPreservedCenter`.
+ *
+ * Besides drawn links, all three layouts order by hidden links
+ * (`collectHiddenLinks`: Set/Get-style virtual nodes, Use Everywhere).
  */
+
+import { readUseEverywhereLinks } from "./flowGraph.js";
 
 export const DEFAULTS = {
     rankdir: "LR",
     nodesep: 50,
     ranksep: 80,
     groupPadding: 30,
+    /**
+     * Smart Top-Bottom: nodes and groups share their "left" or "right" edge;
+     * "mixed" = nodes fed from outside their group left, the rest right.
+     */
+    tbAlign: "mixed",
 };
 
 const MARGIN = 50;
@@ -40,21 +51,50 @@ export function setSettingsSource(fn) {
 /**
  * Current settings, falling back to defaults.
  *
+ * @param {{ rankdir?: string }} [options] - Per-call options; a valid `rankdir`
+ *   ("LR" / "TB", chosen from the menu entry) overrides the settings source.
  * @returns {{ rankdir: string, nodesep: number, ranksep: number, groupPadding: number }}
  */
-function getSettings() {
+function getSettings(options) {
     let s = null;
     try {
         s = settingsSource();
     } catch {
         s = null;
     }
-    return { ...DEFAULTS, ...(s || {}) };
+    const merged = { ...DEFAULTS, ...(s || {}) };
+    const dir = options?.rankdir;
+    if (dir === "LR" || dir === "TB") merged.rankdir = dir;
+    return merged;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared Utilities
 // ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Size a node takes on screen, without its title bar: `[width, bodyHeight]`.
+ * A collapsed node is only its title (body height 0, the collapsed width --
+ * Set/Get nodes are usually collapsed, and laying them out at their full
+ * `size` left big gaps). Otherwise the rendered size (`renderingSize`, which
+ * includes Vue content growth), falling back to `size`.
+ *
+ * @param {Object} node - LGraphNode.
+ * @returns {Array<number>} [width, height].
+ */
+function sizeOf(node) {
+    const lg = globalThis.LiteGraph;
+    if (node.flags?.collapsed && !lg?.vueNodesMode) {
+        return [node._collapsed_width || lg?.NODE_COLLAPSED_WIDTH || 80, 0];
+    }
+    try {
+        const s = node.renderingSize;
+        if (s && s[0] > 0 && s[1] >= 0) return [s[0], s[1]];
+    } catch {
+        // Fall back to the stored size.
+    }
+    return [node.size[0], node.size[1]];
+}
 
 /**
  * Partition nodes into connected (has any links) and disconnected (zero links).
@@ -86,8 +126,8 @@ function layoutDisconnectedNodes(nodes, startY, startX = MARGIN) {
     for (const node of nodes) {
         if (col >= 5) { x = startX; y += rowH + MARGIN + titleH; rowH = 0; col = 0; }
         node.pos = [x, y];
-        x += node.size[0] + MARGIN;
-        rowH = Math.max(rowH, node.size[1] + titleH);
+        x += sizeOf(node)[0] + MARGIN;
+        rowH = Math.max(rowH, sizeOf(node)[1] + titleH);
         col++;
     }
 }
@@ -97,7 +137,7 @@ function getGraphBottom(nodes) {
     let maxY = 0;
     const titleH = TITLE_HEIGHT();
     for (const node of nodes) {
-        maxY = Math.max(maxY, node.pos[1] + node.size[1] + titleH);
+        maxY = Math.max(maxY, node.pos[1] + sizeOf(node)[1] + titleH);
     }
     return maxY;
 }
@@ -148,8 +188,8 @@ function computeCentroid(nodes) {
     const titleH = TITLE_HEIGHT();
     let sumX = 0, sumY = 0;
     for (const node of nodes) {
-        sumX += node.pos[0] + node.size[0] / 2;
-        sumY += node.pos[1] - titleH / 2 + node.size[1] / 2;
+        sumX += node.pos[0] + sizeOf(node)[0] / 2;
+        sumY += node.pos[1] - titleH / 2 + sizeOf(node)[1] / 2;
     }
     return { x: sumX / nodes.length, y: sumY / nodes.length };
 }
@@ -294,10 +334,252 @@ function getNodesBounds(nodes) {
     for (const node of nodes) {
         minX = Math.min(minX, node.pos[0]);
         minY = Math.min(minY, node.pos[1] - titleH);
-        maxX = Math.max(maxX, node.pos[0] + node.size[0]);
-        maxY = Math.max(maxY, node.pos[1] + node.size[1]);
+        maxX = Math.max(maxX, node.pos[0] + sizeOf(node)[0]);
+        maxY = Math.max(maxY, node.pos[1] + sizeOf(node)[1]);
     }
     return { minX, minY, maxX, maxY };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Hidden Links
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Connections between nodes of one graph that are not drawn as links, as
+ * layout-only edges:
+ * - Virtual nodes (Set/Get style): `resolveVirtualOutput(slot)` -> edge from
+ *   the returned source node; otherwise an instance `getInputLink(slot)` that
+ *   returns a link into ANOTHER node (the setter) -> edge setter -> node.
+ *   Same generic hooks the frontend and the Flow Visualizer use; no node type
+ *   names. A broken Get node may show its own alert when asked.
+ * - Use Everywhere (`graph.extra.ue_links`): edge broadcaster (or the source
+ *   when there is none) -> receiving node.
+ * Edges to nodes of other graphs, self edges and duplicates are dropped.
+ * Never throws.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @returns {Array<{origin_id: *, target_id: *}>} Edges, with the nodes' own ids.
+ */
+export function collectHiddenLinks(graph) {
+    const nodes = graph?._nodes || [];
+    const byId = new Map(nodes.map((n) => [String(n.id), n]));
+    const out = [];
+    const seen = new Set();
+    /** Add an edge between two nodes of this graph (objects or ids). */
+    const add = (from, to) => {
+        const a = typeof from === "object" ? from : byId.get(String(from));
+        const b = typeof to === "object" ? to : byId.get(String(to));
+        if (!a || !b || a === b) return;
+        if (byId.get(String(a.id)) !== a || byId.get(String(b.id)) !== b) return; // Other graph.
+        const key = a.id + ">" + b.id;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push({ origin_id: a.id, target_id: b.id });
+    };
+
+    for (const node of nodes) {
+        if (!node?.isVirtualNode || node.subgraph) continue;
+        const slots = Math.max(1, (node.outputs || []).length);
+        for (let slot = 0; slot < slots; slot++) {
+            try {
+                const source = typeof node.resolveVirtualOutput === "function" ? node.resolveVirtualOutput(slot) : null;
+                if (source?.node) {
+                    add(source.node, node);
+                    continue;
+                }
+                const link = typeof node.getInputLink === "function" ? node.getInputLink(slot) : null;
+                if (link && String(link.target_id) !== String(node.id)) add(link.target_id, node);
+            } catch {
+                // A broken hook just contributes no edge.
+            }
+        }
+    }
+
+    try {
+        for (const l of readUseEverywhereLinks(graph)) add(l.via ?? l.origin, l.target);
+    } catch {
+        // Malformed UE data: ignore.
+    }
+    return out;
+}
+
+/**
+ * Bridge links for laying out one group's contents: when a path leaves the
+ * group at member A and comes back in at member B through ungrouped nodes
+ * only (drawn or Set/Get links), A -> B counts as a link inside the group.
+ * Without it the group layout only sees the cut: B looks like a start node
+ * and lands in the first column, though its data arrives after A. E.g. a
+ * chain that runs out of the group through one loose node and back in.
+ *
+ * Paths through another group don't count: the order between groups
+ * already shows that, and in a hub group (a settings group whose values
+ * come back via Gets after a detour through later groups) such bridges
+ * pushed every returning chain into its own late column, leaving large
+ * empty areas.
+ *
+ * Never creates loops: the workflow is acyclic, so a path A -> ... -> B
+ * means B runs after A. Returned in the `collectHiddenLinks` format; pass
+ * them along with the hidden links (they weigh like hidden links).
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {Array<Object>} members - The group's nodes.
+ * @param {Array<{origin_id: *, target_id: *}>} hidden - From `collectHiddenLinks`.
+ * @param {Map<*, Object>} [nodeToGroup] - Node id -> top-level group (from
+ *   `resolveGroups`); the path stops at any node in it that isn't a member.
+ * @returns {Array<{origin_id: *, target_id: *}>} One link per (A, B) pair, ids as on the nodes.
+ */
+export function collectBridgeLinks(graph, members, hidden = [], nodeToGroup = new Map()) {
+    const grouped = new Set([...nodeToGroup.keys()].map(String));
+    const memberById = new Map(members.map((n) => [String(n.id), n]));
+    const out = new Map(); // node id -> successor ids (drawn + hidden)
+    for (const l of [...Object.values(graph.links || {}), ...hidden]) {
+        if (!l) continue;
+        const a = String(l.origin_id), b = String(l.target_id);
+        if (!out.has(a)) out.set(a, []);
+        out.get(a).push(b);
+    }
+    const bridges = [];
+    for (const [id, node] of memberById) {
+        const seen = new Set();
+        const found = new Set();
+        // Start from the member's ungrouped successors; never enter another group.
+        const stack = (out.get(id) || []).filter((s) => !memberById.has(s) && !grouped.has(s));
+        while (stack.length) {
+            const cur = stack.pop();
+            if (seen.has(cur)) continue;
+            seen.add(cur);
+            for (const next of out.get(cur) || []) {
+                if (memberById.has(next)) {
+                    if (next !== id) found.add(next); // Back in the group: stop here.
+                } else if (!seen.has(next) && !grouped.has(next)) {
+                    stack.push(next);
+                }
+            }
+        }
+        for (const t of found) bridges.push({ origin_id: node.id, target_id: memberById.get(t).id });
+    }
+    return bridges;
+}
+
+/**
+ * Where every node sits in the flow of the whole graph, for ordering nodes
+ * the layout itself can't tell apart (same column, no links between them --
+ * e.g. two chains in a group fed from different places).
+ *
+ * `from` = longest path from a node with no inputs (counting starts at the
+ * beginning: such a node is 0); `to` = longest path to a node with no
+ * outputs. Over drawn and hidden links of the whole graph, ignoring group
+ * boundaries, so a Get fed by a Set in an early group gets a low `from` and
+ * a node fed back from late in the graph a high one. Loops (only possible
+ * through muted/broken nodes) are broken at the remaining node with the
+ * fewest open inputs.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {Array<{origin_id: *, target_id: *}>} [hidden] - From `collectHiddenLinks`.
+ * @returns {Map<string, {from: number, to: number}>} Keyed by `String(node.id)`.
+ */
+export function computeFlowOrder(graph, hidden = []) {
+    const nodes = (graph._nodes || []).map((n) => String(n.id));
+    const known = new Set(nodes);
+    const succ = new Map(nodes.map((id) => [id, new Set()]));
+    const pred = new Map(nodes.map((id) => [id, new Set()]));
+    for (const l of [...Object.values(graph.links || {}), ...hidden]) {
+        if (!l) continue;
+        const a = String(l.origin_id), b = String(l.target_id);
+        if (a === b || !known.has(a) || !known.has(b)) continue;
+        succ.get(a).add(b);
+        pred.get(b).add(a);
+    }
+
+    // Topological order (Kahn); loops broken at the fewest open inputs.
+    const open = new Map(nodes.map((id) => [id, pred.get(id).size]));
+    const done = new Set();
+    const order = [];
+    const queue = nodes.filter((id) => open.get(id) === 0);
+    while (order.length < nodes.length) {
+        if (queue.length === 0) {
+            let pick = null;
+            for (const id of nodes) if (!done.has(id) && (pick === null || open.get(id) < open.get(pick))) pick = id;
+            queue.push(pick);
+        }
+        const id = queue.shift();
+        if (done.has(id)) continue;
+        done.add(id);
+        order.push(id);
+        for (const s of succ.get(id)) {
+            open.set(s, open.get(s) - 1);
+            if (open.get(s) === 0 && !done.has(s)) queue.push(s);
+        }
+    }
+
+    const pos = new Map(order.map((id, i) => [id, i]));
+    const res = new Map(nodes.map((id) => [id, { from: 0, to: 0 }]));
+    for (const id of order) {
+        for (const p of pred.get(id)) {
+            if (pos.get(p) < pos.get(id)) res.get(id).from = Math.max(res.get(id).from, res.get(p).from + 1);
+        }
+    }
+    for (let i = order.length - 1; i >= 0; i--) {
+        const id = order[i];
+        for (const s of succ.get(id)) {
+            if (pos.get(s) > i) res.get(id).to = Math.max(res.get(id).to, res.get(s).to + 1);
+        }
+    }
+    return res;
+}
+
+/**
+ * Rank of each separate chain among `nodes`, by its place in the flow of the
+ * whole graph. Chains = groups of nodes joined by links among `nodes` (drawn,
+ * hidden, bridges). A chain whose earliest node sits earlier in the graph
+ * (lowest `from`) ranks first; then the one with more still ahead (highest
+ * `to`, so of two unfed chains the longer one); then the order of its first
+ * node in `nodes`. Only whole chains are ordered -- nodes within a chain keep
+ * the order they come in, so the layouts' own placement inside a chain is
+ * untouched (sorting every node by flow scattered Gets around the node they
+ * feed and moved chains for no gain).
+ *
+ * @param {Array<Object>} nodes - Nodes being laid out together.
+ * @param {Map<string, {from: number, to: number}>} flow - From `computeFlowOrder`.
+ * @param {Object} graph - For drawn links.
+ * @param {Array<{origin_id: *, target_id: *}>} [hidden] - Hidden + bridge links.
+ * @returns {Map<string, number>} `String(node.id)` -> chain rank (0 = first).
+ */
+function chainRanks(nodes, flow, graph, hidden = []) {
+    const ids = nodes.map((n) => String(n.id));
+    const known = new Set(ids);
+    const parent = new Map(ids.map((id) => [id, id]));
+    const find = (id) => (parent.get(id) === id ? id : (parent.set(id, find(parent.get(id))), parent.get(id)));
+    for (const l of [...Object.values(graph.links || {}), ...hidden]) {
+        if (!l) continue;
+        const a = String(l.origin_id), b = String(l.target_id);
+        if (known.has(a) && known.has(b)) parent.set(find(a), find(b));
+    }
+    const chains = new Map(); // root -> { from, to, first }
+    ids.forEach((id, i) => {
+        const at = flow.get(id) || { from: 0, to: 0 };
+        const c = chains.get(find(id));
+        if (!c) chains.set(find(id), { from: at.from, to: at.to, first: i });
+        else { c.from = Math.min(c.from, at.from); c.to = Math.max(c.to, at.to); }
+    });
+    const order = [...chains.entries()].sort(([, a], [, b]) => (a.from - b.from) || (b.to - a.to) || (a.first - b.first));
+    const rankOf = new Map(order.map(([root], i) => [root, i]));
+    return new Map(ids.map((id) => [id, rankOf.get(find(id))]));
+}
+
+/**
+ * `nodes` with whole chains sorted by `chainRanks`, nodes within a chain in
+ * their given order (stable sort). The layouts keep this as their start order.
+ *
+ * @param {Array<Object>} nodes - Nodes to sort (not modified).
+ * @param {Map<string, {from: number, to: number}>} flow - From `computeFlowOrder`.
+ * @param {Object} graph - For drawn links.
+ * @param {Array<{origin_id: *, target_id: *}>} [hidden] - Hidden + bridge links.
+ * @returns {Array<Object>} Sorted copy.
+ */
+function sortChainsByFlow(nodes, flow, graph, hidden = []) {
+    const rank = chainRanks(nodes, flow, graph, hidden);
+    return [...nodes].sort((a, b) => rank.get(String(a.id)) - rank.get(String(b.id)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -492,33 +774,266 @@ function computeGroupSize(group, nodes, padding) {
 }
 
 /**
- * Build top-level edges between groups/ungrouped nodes for inter-group layout.
- * Returns an array of { srcTopId, tgtTopId } pairs (deduplicated).
+ * Build top-level edges between groups/ungrouped nodes for inter-group layout,
+ * from the drawn links plus the hidden ones. Deduplicated per block pair; a
+ * pair is `hidden` only when no drawn link connects it.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {Map<*, Object>} nodeToGroup - Node id -> top-level group.
+ * @param {Array<Object>} ungroupedConnected - Ungrouped nodes taking part in the layout.
+ * @param {Array<{origin_id: *, target_id: *}>} [hidden] - From `collectHiddenLinks`.
+ * @returns {Array<{srcTopId: string, tgtTopId: string, hidden: boolean, weight: number}>}
+ *   `weight` = number of links (drawn + hidden) behind the pair.
  */
-function buildTopLevelEdges(graph, nodeToGroup, ungroupedConnected) {
-    const edges = [];
-    const seen = new Set();
+function buildTopLevelEdges(graph, nodeToGroup, ungroupedConnected, hidden = []) {
+    const byKey = new Map();
     const ungroupedSet = new Set(ungroupedConnected.map((n) => n.id));
-
-    for (const link of Object.values(graph.links || {})) {
-        if (!link) continue;
-        const srcGroup = nodeToGroup.get(link.origin_id);
-        const tgtGroup = nodeToGroup.get(link.target_id);
-
-        const srcTopId = srcGroup ? "group_" + srcGroup.id
-            : ungroupedSet.has(link.origin_id) ? "node_" + link.origin_id : null;
-        const tgtTopId = tgtGroup ? "group_" + tgtGroup.id
-            : ungroupedSet.has(link.target_id) ? "node_" + link.target_id : null;
-
-        if (!srcTopId || !tgtTopId || srcTopId === tgtTopId) continue;
-
+    const topId = (id) => {
+        const group = nodeToGroup.get(id);
+        if (group) return "group_" + group.id;
+        return ungroupedSet.has(id) ? "node_" + id : null;
+    };
+    const add = (link, isHidden) => {
+        if (!link) return;
+        const srcTopId = topId(link.origin_id);
+        const tgtTopId = topId(link.target_id);
+        if (!srcTopId || !tgtTopId || srcTopId === tgtTopId) return;
         const key = srcTopId + "->" + tgtTopId;
-        if (!seen.has(key)) {
-            seen.add(key);
-            edges.push({ srcTopId, tgtTopId });
+        const existing = byKey.get(key);
+        if (existing) {
+            existing.hidden &&= isHidden;
+            existing.weight++;
+        } else {
+            byKey.set(key, { srcTopId, tgtTopId, hidden: isHidden, weight: 1 });
+        }
+    };
+
+    for (const link of Object.values(graph.links || {})) add(link, false);
+    for (const link of hidden) add(link, true);
+    return [...byKey.values()];
+}
+
+/**
+ * Find satellites: clusters of ungrouped nodes (joined to each other by drawn
+ * or hidden links) that take input from exactly one group and feed only that
+ * same group -- e.g. a node outside a group that processes something from it
+ * and hands it back. As separate blocks they form a loop with the group that
+ * no order can untangle, so they ended up far away with long links both
+ * ways. Instead they are left out of the block ordering and placed to the
+ * right of their group (in TB too -- slots are on the sides of nodes, and
+ * there's room beside a tall column), level with the group member feeding
+ * them, laid out left to right among themselves. They are not moved into the
+ * group. Call after the groups' contents are laid out (`_groupOffsetY` set).
+ *
+ * Usage: `size(group, s)` gives the block size of the group plus its
+ * satellites (`s` = the group's own size); `place(group, x, y, s)` puts the
+ * satellites next to a group placed at (x, y); `ids` holds every satellite
+ * node id (exclude them from the ungrouped blocks).
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {Map<*, Object>} nodeToGroup - Node id -> top-level group.
+ * @param {Array<Object>} ungroupedConnected - Ungrouped nodes with links.
+ * @param {Array<{origin_id: *, target_id: *}>} hidden - Hidden links.
+ * @param {number} gap - Space between the group and its satellites, and between satellites.
+ * @returns {{ ids: Set<*>, size: function(Object, {width: number, height: number}): {width: number, height: number},
+ *   place: function(Object, number, number, {width: number, height: number}): void }}
+ */
+function findSatellites(graph, nodeToGroup, ungroupedConnected, hidden, gap) {
+    const titleH = TITLE_HEIGHT();
+    const loose = new Map(ungroupedConnected.map((n) => [n.id, n]));
+    const links = [...Object.values(graph.links || {}).filter(Boolean), ...hidden];
+
+    // Clusters of ungrouped nodes.
+    const parent = new Map([...loose.keys()].map((id) => [id, id]));
+    const find = (id) => (parent.get(id) === id ? id : (parent.set(id, find(parent.get(id))), parent.get(id)));
+    for (const l of links) {
+        if (loose.has(l.origin_id) && loose.has(l.target_id)) parent.set(find(l.origin_id), find(l.target_id));
+    }
+    const clusters = new Map();
+    for (const id of loose.keys()) {
+        const root = find(id);
+        if (!clusters.has(root)) clusters.set(root, { nodes: [], from: new Set(), to: new Set(), other: false });
+        clusters.get(root).nodes.push(loose.get(id));
+    }
+    for (const l of links) {
+        const a = loose.has(l.origin_id), b = loose.has(l.target_id);
+        if (a === b) continue;
+        const c = clusters.get(find(a ? l.origin_id : l.target_id));
+        const outside = a ? l.target_id : l.origin_id;
+        const group = nodeToGroup.get(outside);
+        if (!group) c.other = true;
+        else (a ? c.to : c.from).add(group);
+    }
+
+    // Top of the group member feeding a cluster, relative to the group (the
+    // group's contents are laid out already). Drawn links first, hidden ones
+    // only when no drawn link feeds the cluster.
+    const anchorOf = (memberIds) => {
+        for (const set of [Object.values(graph.links || {}).filter(Boolean), hidden]) {
+            let top = Infinity;
+            for (const l of set) {
+                if (!memberIds.has(l.target_id) || memberIds.has(l.origin_id)) continue;
+                const src = graph.getNodeById?.(l.origin_id);
+                if (src?._groupOffsetY != null) top = Math.min(top, src._groupOffsetY - titleH);
+            }
+            if (top < Infinity) return top;
+        }
+        return 0;
+    };
+
+    const byGroup = new Map();
+    const ids = new Set();
+    for (const c of clusters.values()) {
+        if (c.other || c.from.size !== 1 || c.to.size !== 1) continue;
+        const [group] = c.from;
+        if (!c.to.has(group)) continue;
+        // Lay the cluster out left to right (cluster-relative offsets): node
+        // slots are on the sides, so even in TB a satellite reads best beside
+        // the node feeding it.
+        const memberIds = new Set(c.nodes.map((n) => n.id));
+        const edges = links.filter((l) => memberIds.has(l.origin_id) && memberIds.has(l.target_id))
+            .map((l) => ({ srcTopId: String(l.origin_id), tgtTopId: String(l.target_id) }));
+        const { level } = rankBlocks(c.nodes.map((n) => String(n.id)), edges);
+        const layers = [];
+        for (const n of c.nodes) (layers[level.get(String(n.id))] ??= []).push(n);
+        const items = [];
+        let u = 0, height = 0;
+        for (const layer of layers.filter(Boolean)) {
+            let v = 0, widthMax = 0;
+            for (const n of layer) {
+                const [w, h] = sizeOf(n);
+                items.push({ node: n, dx: u, dy: v });
+                v += h + titleH + gap;
+                widthMax = Math.max(widthMax, w);
+            }
+            height = Math.max(height, v - gap);
+            u += widthMax + gap;
+        }
+        if (!byGroup.has(group)) byGroup.set(group, []);
+        byGroup.get(group).push({ items, width: u - gap, height, anchor: anchorOf(memberIds) });
+        for (const n of c.nodes) ids.add(n.id);
+    }
+    // Each cluster level with its feeder; several on one group stack
+    // downwards without overlapping, in feeder order.
+    for (const [group, list] of byGroup) {
+        list.sort((a, b) => a.anchor - b.anchor);
+        const entry = { items: [], width: 0, height: 0 };
+        let bottom = -Infinity;
+        for (const c of list) {
+            const top = Math.max(c.anchor, bottom + gap);
+            for (const it of c.items) entry.items.push({ ...it, dy: it.dy + top });
+            entry.width = Math.max(entry.width, c.width);
+            bottom = top + c.height;
+        }
+        entry.height = bottom;
+        byGroup.set(group, entry);
+    }
+
+    return {
+        ids,
+        size(group, s) {
+            const sat = byGroup.get(group);
+            if (!sat) return s;
+            return { width: s.width + gap + sat.width, height: Math.max(s.height, sat.height) };
+        },
+        place(group, x, y, s) {
+            const sat = byGroup.get(group);
+            if (!sat) return;
+            for (const { node, dx, dy } of sat.items) {
+                node.pos = [x + s.width + gap + dx, y + dy + titleH];
+            }
+        },
+    };
+}
+
+/**
+ * Assign columns to top-level blocks (groups / ungrouped nodes) from the
+ * edges between them, Quick-layout style:
+ * 1. Topological order (Kahn). When only cycles remain, the loop is broken by
+ *    link count (Eades-Lin-Smyth style): the remaining block whose links to
+ *    other remaining blocks go out most and come in least (out weight minus
+ *    in weight; then the lower in weight, then earliest in `ids`) goes next,
+ *    and its unprocessed inputs become back edges. So when group A feeds B
+ *    through four links and B feeds A through one, only that one points back.
+ * 2. Longest path from the sources over the forward edges.
+ * 3. Pull every block with consumers right up to one column before its
+ *    nearest consumer (like `floatRightLayout`), so feeders sit next to
+ *    what they feed.
+ * Deterministic for a given structure, so re-running moves nothing.
+ *
+ * @param {Array<string>} ids - Block ids in a stable order.
+ * @param {Array<{srcTopId: string, tgtTopId: string, weight?: number}>} edges - Block
+ *   edges; `weight` (default 1) = number of links behind the edge.
+ * @returns {{ level: Map<string, number>, preds: Map<string, Array<string>> }}
+ *   Column per block (0-based) and forward-edge predecessors per block.
+ */
+function rankBlocks(ids, edges) {
+    const index = new Map(ids.map((id, i) => [id, i]));
+    const outs = new Map(ids.map((id) => [id, []]));
+    const ins = new Map(ids.map((id) => [id, []]));
+    const indeg = new Map(ids.map((id) => [id, 0]));
+    for (const { srcTopId: a, tgtTopId: b, weight = 1 } of edges) {
+        if (!index.has(a) || !index.has(b) || a === b) continue;
+        outs.get(a).push(b);
+        ins.get(b).push([a, weight]);
+        indeg.set(b, indeg.get(b) + 1);
+    }
+    const outW = new Map(ids.map((id) => [id, []]));
+    for (const [b, list] of ins) for (const [a, w] of list) outW.get(a).push([b, w]);
+
+    const done = new Set();
+    const order = [];
+    const ready = ids.filter((id) => indeg.get(id) === 0);
+    /** Sum of weights to blocks not yet placed. */
+    const open = (list) => list.reduce((s, [o, w]) => (done.has(o) ? s : s + w), 0);
+    while (order.length < ids.length) {
+        if (ready.length === 0) {
+            // Cycle: place the block that most clearly comes first by link count.
+            let pick = null, pickScore = 0, pickIn = 0;
+            for (const id of ids) {
+                if (done.has(id)) continue;
+                const inW = open(ins.get(id));
+                const score = open(outW.get(id)) - inW;
+                if (pick === null || score > pickScore || (score === pickScore && inW < pickIn)) {
+                    pick = id; pickScore = score; pickIn = inW;
+                }
+            }
+            ready.push(pick);
+        }
+        ready.sort((a, b) => index.get(a) - index.get(b));
+        const id = ready.shift();
+        if (done.has(id)) continue;
+        done.add(id);
+        order.push(id);
+        for (const t of outs.get(id)) {
+            if (done.has(t)) continue;
+            indeg.set(t, indeg.get(t) - 1);
+            if (indeg.get(t) === 0) ready.push(t);
         }
     }
-    return edges;
+
+    const pos = new Map(order.map((id, i) => [id, i]));
+    const fwdOuts = new Map(ids.map((id) => [id, []]));
+    const preds = new Map(ids.map((id) => [id, []]));
+    for (const id of ids) {
+        for (const t of outs.get(id)) {
+            if (pos.get(t) > pos.get(id) && !fwdOuts.get(id).includes(t)) {
+                fwdOuts.get(id).push(t);
+                preds.get(t).push(id);
+            }
+        }
+    }
+
+    const level = new Map(ids.map((id) => [id, 0]));
+    for (const id of order) {
+        for (const t of fwdOuts.get(id)) level.set(t, Math.max(level.get(t), level.get(id) + 1));
+    }
+    for (let i = order.length - 1; i >= 0; i--) {
+        const id = order[i];
+        const consumers = fwdOuts.get(id);
+        if (consumers.length) level.set(id, Math.min(...consumers.map((t) => level.get(t))) - 1);
+    }
+    return { level, preds };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -529,43 +1044,49 @@ function buildTopLevelEdges(graph, nodeToGroup, ungroupedConnected) {
  * Core float-right layout on a set of nodes using a specific graph's links.
  * Positions nodes in right-aligned columns with barycenter sorting.
  *
+ * Columns come from `rankBlocks` over the nodes (longest path, feeders pulled
+ * next to their nearest consumer) using drawn and hidden links; the start
+ * order within a column is the graph's execution order.
+ *
  * @param {Array} nodes - Connected nodes to layout.
  * @param {Object} graph - Graph instance (for links and computeExecutionOrder).
  * @param {Set} [nodeIdFilter] - Only consider nodes in this set.
+ * @param {Array<{origin_id: *, target_id: *}>} [hidden] - Hidden links (`collectHiddenLinks`).
+ * @param {Map<string, {from: number, to: number}>} [flow] - `computeFlowOrder`, orders separate chains.
  */
-function floatRightLayout(nodes, graph, nodeIdFilter = null) {
+function floatRightLayout(nodes, graph, nodeIdFilter = null, hidden = [], flow = null) {
     const filter = nodeIdFilter || new Set(nodes.map((n) => n.id));
 
-    const execOrder = graph.computeExecutionOrder(false, true);
-    if (!execOrder || execOrder.length === 0) return;
-
+    const execOrder = graph.computeExecutionOrder(false, true) || [];
     const ordered = execOrder.filter((n) => filter.has(n.id));
+    // Nodes the execution order left out (loops) go last, in list order.
+    const inOrder = new Set(ordered);
+    for (const node of nodes) if (filter.has(node.id) && !inOrder.has(node)) ordered.push(node);
+    if (ordered.length === 0) return;
 
-    // Reassign levels by pulling nodes toward their consumers.
-    for (let i = ordered.length - 1; i >= 0; i--) {
-        const node = ordered[i];
-        let minConsumerLevel = null;
-
-        for (const output of node.outputs || []) {
-            if (!output.links) continue;
-            for (const linkId of output.links) {
-                const linkInfo = graph.links[linkId];
-                if (!linkInfo) continue;
-                const consumer = graph.getNodeById(linkInfo.target_id);
-                if (!consumer || !filter.has(consumer.id)) continue;
-                const cl = (consumer._level || 1) - 1;
-                if (minConsumerLevel === null || cl < minConsumerLevel) minConsumerLevel = cl;
-            }
+    const edges = [];
+    const addEdge = (link) => {
+        if (link && filter.has(link.origin_id) && filter.has(link.target_id)) {
+            edges.push({ srcTopId: String(link.origin_id), tgtTopId: String(link.target_id) });
         }
-        if (minConsumerLevel !== null) node._level = minConsumerLevel;
-    }
+    };
+    for (const link of Object.values(graph.links || {})) addEdge(link);
+    for (const link of hidden) addEdge(link);
+    const { level } = rankBlocks(ordered.map((n) => String(n.id)), edges);
 
     // Bucket into columns.
     const columns = [];
     for (const node of ordered) {
-        const col = node._level || 1;
+        const col = level.get(String(node.id)) ?? 0;
         if (!columns[col]) columns[col] = [];
         columns[col].push(node);
+    }
+    // Start order inside a column: separate chains by their place in the
+    // whole graph (`chainRanks`), execution order within a chain (stable
+    // sort); barycenter sweeps refine it below.
+    if (flow) {
+        const rank = chainRanks(ordered, flow, graph, hidden);
+        for (const column of columns) column?.sort((a, b) => rank.get(String(a.id)) - rank.get(String(b.id)));
     }
 
     const titleH = TITLE_HEIGHT();
@@ -577,10 +1098,10 @@ function floatRightLayout(nodes, graph, nodeIdFilter = null) {
         let maxW = 100, yOff = MARGIN + titleH;
         for (const node of column) {
             node.pos = [xOffset, yOff];
-            maxW = Math.max(maxW, node.size[0]);
-            yOff += node.size[1] + MARGIN + titleH;
+            maxW = Math.max(maxW, sizeOf(node)[0]);
+            yOff += sizeOf(node)[1] + MARGIN + titleH;
         }
-        for (const node of column) node.pos = [node.pos[0] + maxW - node.size[0], node.pos[1]];
+        for (const node of column) node.pos = [node.pos[0] + maxW - sizeOf(node)[0], node.pos[1]];
         xOffset += maxW + MARGIN;
     }
 
@@ -596,12 +1117,14 @@ function floatRightLayout(nodes, graph, nodeIdFilter = null) {
                 for (const inp of node.inputs || []) {
                     if (inp.link == null) continue;
                     const li = graph.links[inp.link];
-                    if (li) { const nb = graph.getNodeById(li.origin_id); if (nb) ys.push(nb.pos[1]); }
+                    // Only nodes being laid out here: anything else still sits
+                    // where it was, which made re-runs reorder the column.
+                    if (li) { const nb = graph.getNodeById(li.origin_id); if (nb && filter.has(nb.id)) ys.push(nb.pos[1]); }
                 }
                 for (const out of node.outputs || []) {
                     for (const lid of out.links || []) {
                         const li = graph.links[lid];
-                        if (li) { const nb = graph.getNodeById(li.target_id); if (nb) ys.push(nb.pos[1]); }
+                        if (li) { const nb = graph.getNodeById(li.target_id); if (nb && filter.has(nb.id)) ys.push(nb.pos[1]); }
                     }
                 }
                 node._barycenter = ys.length > 0
@@ -616,11 +1139,11 @@ function floatRightLayout(nodes, graph, nodeIdFilter = null) {
     for (const column of columns) {
         if (!column) continue;
         let maxW = 100;
-        for (const node of column) maxW = Math.max(maxW, node.size[0]);
+        for (const node of column) maxW = Math.max(maxW, sizeOf(node)[0]);
         let yOff = MARGIN + titleH;
         for (const node of column) {
-            node.pos = [xOffset + maxW - node.size[0], yOff];
-            yOff += node.size[1] + MARGIN + titleH;
+            node.pos = [xOffset + maxW - sizeOf(node)[0], yOff];
+            yOff += sizeOf(node)[1] + MARGIN + titleH;
         }
         xOffset += maxW + MARGIN;
     }
@@ -640,7 +1163,8 @@ export function arrangeFloatRight(graph) {
     if (connected.length === 0) {
         layoutDisconnectedNodes(disconnected, 0);
     } else {
-        floatRightLayout(connected, graph);
+        const hidden = collectHiddenLinks(graph);
+        floatRightLayout(connected, graph, null, hidden, computeFlowOrder(graph, hidden));
         layoutDisconnectedNodes(disconnected, getGraphBottom(connected));
     }
     positionSubgraphIO(graph);
@@ -671,6 +1195,8 @@ export function arrangeFloatRightGroups(graph) {
 
     const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolveGroups(graph);
     const { connected: ungroupedConnected, disconnected } = partitionNodes(ungroupedNodes);
+    const hidden = collectHiddenLinks(graph);
+    const flow = computeFlowOrder(graph, hidden);
 
     // ── Phase 1: Layout within each group ──────────────────────────
 
@@ -679,77 +1205,63 @@ export function arrangeFloatRightGroups(graph) {
     for (const group of topLevelGroups) {
         const nodes = groupNodesMap.get(group) || [];
         groupSizes.set(group, layoutGroupContents(group, nodes, padding,
-            (gc) => floatRightLayout(gc, graph, new Set(gc.map((n) => n.id)))));
+            (gc) => floatRightLayout(gc, graph, new Set(gc.map((n) => n.id)),
+                [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)], flow)));
     }
 
     // ── Phase 2: Position groups as columns ────────────────────────
 
-    // Assign each group a level based on the minimum _level of its nodes from
-    // a full-graph execution order, then layout groups as "mega-nodes" in
-    // right-aligned columns.
-    const execOrder = graph.computeExecutionOrder(false, true);
-    const groupLevels = new Map();
-
-    if (execOrder) {
-        for (const node of execOrder) {
-            const grp = nodeToGroup.get(node.id);
-            if (!grp) continue;
-            const level = node._level || 1;
-            const cur = groupLevels.get(grp);
-            if (cur == null || level < cur) groupLevels.set(grp, level);
-        }
-    }
-
-    // Also compute levels for ungrouped connected nodes.
-    const ungroupedLevels = new Map();
-    if (execOrder) {
-        for (const node of execOrder) {
-            if (!nodeToGroup.has(node.id) && ungroupedConnected.includes(node)) {
-                ungroupedLevels.set(node.id, node._level || 1);
-            }
-        }
-    }
-
-    // Build columns of groups + ungrouped nodes.
+    // Groups and ungrouped nodes are blocks; a drawn or hidden link between
+    // two blocks is an edge (same as the dagre layout). Blocks get columns from those edges
+    // (cycles broken), so a group is placed after everything that feeds it
+    // from outside, not by its earliest member. Satellites ride along with
+    // their group (its block includes them).
+    const sats = findSatellites(graph, nodeToGroup, ungroupedConnected, hidden, MARGIN);
+    const flowNodes = ungroupedConnected.filter((n) => !sats.ids.has(n.id));
+    const items = [
+        ...topLevelGroups.map((group) => ({
+            id: "group_" + group.id, type: "group", group,
+            ...sats.size(group, groupSizes.get(group)),
+        })),
+        ...flowNodes.map((node) => ({
+            id: "node_" + node.id, type: "node", node,
+            width: sizeOf(node)[0], height: sizeOf(node)[1] + titleH,
+        })),
+    ];
+    const ranked = rankBlocks(items.map((it) => it.id), buildTopLevelEdges(graph, nodeToGroup, flowNodes, hidden));
     const topColumns = [];
-
-    // Add groups.
-    for (const group of topLevelGroups) {
-        const col = groupLevels.get(group) || 1;
-        if (!topColumns[col]) topColumns[col] = [];
-        topColumns[col].push({
-            type: "group", group,
-            width: groupSizes.get(group).width,
-            height: groupSizes.get(group).height,
-        });
+    for (const item of items) {
+        const col = ranked.level.get(item.id);
+        (topColumns[col] ??= []).push(item);
     }
 
-    // Add ungrouped nodes.
-    for (const node of ungroupedConnected) {
-        const col = ungroupedLevels.get(node.id) || 1;
-        if (!topColumns[col]) topColumns[col] = [];
-        topColumns[col].push({
-            type: "node", node,
-            width: node.size[0],
-            height: node.size[1] + titleH,
-        });
-    }
-
-    // Position in right-aligned columns.
+    // Position in right-aligned columns, column by column; within a column
+    // blocks are ordered by the mean centre of the blocks feeding them
+    // (barycenter), blocks without placed feeders keep their order at the end.
+    const centreY = new Map();
     let xOffset = MARGIN;
     for (const column of topColumns) {
         if (!column) continue;
+        const keyed = column.map((item, index) => {
+            const ys = (ranked.preds.get(item.id) || []).filter((p) => centreY.has(p)).map((p) => centreY.get(p));
+            return { item, index, bary: ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : Infinity };
+        });
+        keyed.sort((a, b) => (a.bary - b.bary) || (a.index - b.index));
+
         let maxW = 100;
         for (const item of column) maxW = Math.max(maxW, item.width);
 
         let yOff = MARGIN;
-        for (const item of column) {
+        for (const { item } of keyed) {
             const x = xOffset + maxW - item.width; // Right-align.
             if (item.type === "group") {
-                placeGroup(item.group, groupNodesMap.get(item.group) || [], x, yOff, item);
+                const s = groupSizes.get(item.group);
+                placeGroup(item.group, groupNodesMap.get(item.group) || [], x, yOff, s);
+                sats.place(item.group, x, yOff, s);
             } else {
                 item.node.pos = [x, yOff + titleH];
             }
+            centreY.set(item.id, yOff + item.height / 2);
             yOff += item.height + MARGIN;
         }
         xOffset += maxW + MARGIN;
@@ -772,11 +1284,95 @@ export function arrangeFloatRightGroups(graph) {
 // Dagre Algorithms
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Dagre edge weight of a drawn link; hidden links weigh 1, so drawn links pull harder. */
+const DRAWN_EDGE_WEIGHT = 2;
+
+/** Dagre centres closer than this (graph units) count as one line. */
+const LINE_TOLERANCE = 2;
+
+/**
+ * Turn dagre's centre alignment into top alignment (LR) / left alignment (TB).
+ *
+ * Dagre places nodes by their centres and lines up linked nodes on a shared
+ * centre line, so a chain of nodes with different heights zigzags along its
+ * tops. Here every line (nodes whose dagre centres agree across the flow)
+ * gets one top edge, and lines are processed in dagre's order, each packed
+ * up as far as the nodes already placed in its steps allow (dagre's spacing
+ * is for centred nodes, so a tall node otherwise left half its height empty
+ * above the lines beside it). Dagre's steps and its order inside each step
+ * are kept, and chains stay straight.
+ *
+ * @param {Array<{x: number, y: number, w: number, h: number}>} placed - Dagre
+ *   centres and box sizes (h includes the title); receives `left` / `top`.
+ * @param {boolean} horizontal - Flow runs left to right.
+ * @param {number} gap - Minimum space between nodes of one step.
+ * @param {string} [tbAlign] - TB only: "left" (default); "right" shares right
+ *   edges instead (the same pass on the mirrored axis, so lines get pushed
+ *   left); "mixed" = per node: a node with `external` set (fed from outside
+ *   the nodes laid out, i.e. from outside the group) takes the line's left
+ *   edge, the others its right edge.
+ * @returns {void}
+ */
+function alignDagreLines(placed, horizontal, gap, tbAlign = "left") {
+    const flip = !horizontal && tbAlign === "right";
+    const mixed = !horizontal && tbAlign === "mixed";
+    // u = along the flow (identifies the step), v = across it.
+    const items = placed.map((p) => ({
+        p,
+        step: Math.round(horizontal ? p.x : p.y),
+        v: horizontal ? p.y : (flip ? -p.x : p.x),
+        half: (horizontal ? p.h : p.w) / 2,
+    }));
+    items.sort((a, b) => a.v - b.v || a.step - b.step);
+
+    // Lines: runs of nearly equal centres, at most one node per step.
+    const lines = [];
+    for (const it of items) {
+        const line = lines[lines.length - 1];
+        if (line && it.v - line.v <= LINE_TOLERANCE && !line.members.some((m) => m.step === it.step)) {
+            line.members.push(it);
+        } else {
+            lines.push({ v: it.v, members: [it] });
+        }
+    }
+
+    const stepEnd = new Map(); // step -> far edge of the last node placed in it
+    const top0 = Math.min(...items.map((it) => it.v - it.half));
+    for (const { members } of lines) {
+        // Start of each member across the flow: one shared start edge, or
+        // (mixed) per node: start edge if fed from outside, else end edge --
+        // both within the band of the line's widest member.
+        const end = Math.max(...members.map((m) => m.v + m.half));
+        const common = Math.min(...members.map((m) => m.v - m.half));
+        const startOf = (m) => (mixed && !m.p.external ? end - 2 * m.half : common);
+        // Pack the whole line up (left in TB) as far as the nodes already
+        // placed in its steps allow; with none, to the top of the layout.
+        // Dagre spaced its centres for centred nodes, so a tall node left
+        // half its height as empty space above it; packing reclaims that.
+        let shift = top0 - common;
+        for (const m of members) {
+            if (stepEnd.has(m.step)) shift = Math.max(shift, stepEnd.get(m.step) + gap - startOf(m));
+        }
+        for (const m of members) {
+            const start = startOf(m) + shift;
+            stepEnd.set(m.step, start + 2 * m.half);
+            const along = (horizontal ? m.p.x - m.p.w / 2 : m.p.y - m.p.h / 2);
+            const across = flip ? -(start + 2 * m.half) : start;
+            [m.p.left, m.p.top] = horizontal ? [along, across] : [across, along];
+        }
+    }
+}
+
 /**
  * Run dagre layout on a set of nodes and their internal edges.
+ *
+ * @param {Array<Object>} nodes - Nodes to lay out.
+ * @param {Object} graphLinks - The graph's links.
+ * @param {Object} settings - Layout settings.
+ * @param {Array<{origin_id: *, target_id: *}>} [hidden] - Hidden links (`collectHiddenLinks`).
  * @returns {{ width: number, height: number }} Bounding size of the layout.
  */
-function runDagreLayout(nodes, graphLinks, settings, offsetX = 0, offsetY = 0) {
+function runDagreLayout(nodes, graphLinks, settings, hidden = []) {
     const dagre = window.dagre;
     if (!dagre || nodes.length === 0) return { width: 0, height: 0 };
 
@@ -784,22 +1380,34 @@ function runDagreLayout(nodes, graphLinks, settings, offsetX = 0, offsetY = 0) {
     g.setGraph({
         rankdir: settings.rankdir, nodesep: settings.nodesep,
         ranksep: settings.ranksep, marginx: 10, marginy: 10,
+        // One Brandes-Koepf alignment instead of the average of four: linked
+        // nodes it lines up share exactly one centre, which alignDagreLines
+        // needs to find the lines (the average leaves them a few px apart).
+        align: "UL",
     });
     g.setDefaultEdgeLabel(() => ({}));
 
     const titleH = TITLE_HEIGHT();
     const nodeIds = new Set();
+    // Prefixed keys: graphlib keeps nodes in a plain object, where integer-like
+    // keys ("7353") iterate in numeric order, so dagre's start order would be
+    // the node ids rather than the order `nodes` is given in (flow order).
+    const key = (id) => "n" + id;
 
     for (const node of nodes) {
         const id = String(node.id);
         nodeIds.add(id);
-        g.setNode(id, { width: node.size[0], height: node.size[1] + titleH });
+        g.setNode(key(id), { width: sizeOf(node)[0], height: sizeOf(node)[1] + titleH });
     }
 
     for (const link of Object.values(graphLinks || {})) {
         if (!link) continue;
         const src = String(link.origin_id), tgt = String(link.target_id);
-        if (nodeIds.has(src) && nodeIds.has(tgt)) g.setEdge(src, tgt);
+        if (nodeIds.has(src) && nodeIds.has(tgt)) g.setEdge(key(src), key(tgt), { weight: DRAWN_EDGE_WEIGHT });
+    }
+    for (const link of hidden) {
+        const src = String(link.origin_id), tgt = String(link.target_id);
+        if (nodeIds.has(src) && nodeIds.has(tgt) && !g.hasEdge(key(src), key(tgt))) g.setEdge(key(src), key(tgt), { weight: 1 });
     }
 
     try { dagre.layout(g); } catch (e) {
@@ -807,29 +1415,50 @@ function runDagreLayout(nodes, graphLinks, settings, offsetX = 0, offsetY = 0) {
         return { width: 0, height: 0 };
     }
 
-    for (const node of nodes) {
-        const dn = g.node(String(node.id));
-        if (!dn) continue;
-        node.pos = [dn.x - node.size[0] / 2 + offsetX, dn.y - (node.size[1] + titleH) / 2 + titleH + offsetY];
+    // Nodes fed from outside this set (drawn or hidden link, e.g. a Get whose
+    // Set is in another group) -- used by the "mixed" TB alignment.
+    const external = new Set();
+    for (const link of [...Object.values(graphLinks || {}), ...hidden]) {
+        if (!link) continue;
+        const src = String(link.origin_id), tgt = String(link.target_id);
+        if (nodeIds.has(tgt) && !nodeIds.has(src)) external.add(tgt);
     }
+
+    const placed = [];
+    for (const node of nodes) {
+        const dn = g.node(key(node.id));
+        if (dn) {
+            placed.push({ node, x: dn.x, y: dn.y, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH,
+                external: external.has(String(node.id)) });
+        }
+    }
+    alignDagreLines(placed, settings.rankdir !== "TB", settings.nodesep, settings.tbAlign);
+    for (const p of placed) p.node.pos = [p.left, p.top + titleH];
 
     const info = g.graph();
     return { width: info.width || 0, height: info.height || 0 };
 }
 
-/** Arrange all nodes using dagre (ignores groups). */
-export function arrangeDagre(graph) {
+/**
+ * Arrange all nodes using dagre (ignores groups).
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {{ rankdir?: string }} [options] - `rankdir` "LR" / "TB" overrides the setting.
+ * @returns {void}
+ */
+export function arrangeDagre(graph, options) {
     if (!window.dagre) { console.error("[EnhancementUtils] dagre not loaded."); return; }
     const allNodes = graph._nodes || [];
     if (allNodes.length === 0) return;
 
-    const settings = getSettings();
+    const settings = getSettings(options);
     const { connected, disconnected } = partitionNodes(allNodes);
 
     if (connected.length === 0) {
         layoutDisconnectedNodes(disconnected, 0);
     } else {
-        runDagreLayout(connected, graph.links, settings);
+        const hidden = collectHiddenLinks(graph);
+        runDagreLayout(sortChainsByFlow(connected, computeFlowOrder(graph, hidden), graph, hidden), graph.links, settings, hidden);
         layoutDisconnectedNodes(disconnected, getGraphBottom(connected));
     }
     positionSubgraphIO(graph);
@@ -843,28 +1472,37 @@ export function arrangeDagre(graph) {
  * Phase 1: Dagre layout within each group.
  * Phase 2: Dagre layout of groups as mega-nodes + ungrouped nodes.
  * Phase 3: Disconnected nodes below.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {{ rankdir?: string }} [options] - `rankdir` "LR" / "TB" overrides the setting.
+ * @returns {void}
  */
-export function arrangeDagreGroups(graph) {
+export function arrangeDagreGroups(graph, options) {
     if (!window.dagre) { console.error("[EnhancementUtils] dagre not loaded."); return; }
     const allNodes = graph._nodes || [];
     if (allNodes.length === 0) return;
-    if ((graph._groups || []).length === 0) { arrangeDagre(graph); return; }
+    if ((graph._groups || []).length === 0) { arrangeDagre(graph, options); return; }
 
-    const settings = getSettings();
+    const settings = getSettings(options);
     const titleH = TITLE_HEIGHT();
     const padding = settings.groupPadding;
 
     const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolveGroups(graph);
     const { connected: ungroupedConnected, disconnected } = partitionNodes(ungroupedNodes);
+    const hidden = collectHiddenLinks(graph);
 
     // ── Phase 1: Layout within each group ──────────────────────────
 
     const groupSizes = new Map();
 
+    const flow = computeFlowOrder(graph, hidden);
     for (const group of topLevelGroups) {
         const nodes = groupNodesMap.get(group) || [];
         groupSizes.set(group, layoutGroupContents(group, nodes, padding,
-            (gc) => runDagreLayout(gc, graph.links, settings)));
+            (gc) => {
+                const links = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
+                return runDagreLayout(sortChainsByFlow(gc, flow, graph, links), graph.links, settings, links);
+            }));
     }
 
     // ── Phase 2: Top-level dagre layout ────────────────────────────
@@ -874,19 +1512,27 @@ export function arrangeDagreGroups(graph) {
     topG.setGraph({
         rankdir: settings.rankdir, nodesep: settings.nodesep,
         ranksep: settings.ranksep, marginx: MARGIN, marginy: MARGIN,
+        acyclicer: "greedy",
     });
     topG.setDefaultEdgeLabel(() => ({}));
 
+    const sats = findSatellites(graph, nodeToGroup, ungroupedConnected, hidden, settings.nodesep);
+    const flowNodes = ungroupedConnected.filter((n) => !sats.ids.has(n.id));
+    const blockSizes = new Map(topLevelGroups.map((g) => [g, sats.size(g, groupSizes.get(g))]));
+
     for (const group of topLevelGroups) {
-        const s = groupSizes.get(group);
+        const s = blockSizes.get(group);
         topG.setNode("group_" + group.id, { width: s.width, height: s.height });
     }
-    for (const node of ungroupedConnected) {
-        topG.setNode("node_" + node.id, { width: node.size[0], height: node.size[1] + titleH });
+    for (const node of flowNodes) {
+        topG.setNode("node_" + node.id, { width: sizeOf(node)[0], height: sizeOf(node)[1] + titleH });
     }
 
-    for (const { srcTopId, tgtTopId } of buildTopLevelEdges(graph, nodeToGroup, ungroupedConnected)) {
-        topG.setEdge(srcTopId, tgtTopId);
+    // Weight = number of links (drawn ones count double). The greedy acyclicer
+    // reverses the lightest edges of a loop, so a group feeding another
+    // through many links stays first (dagre's default ignores weights).
+    for (const { srcTopId, tgtTopId, hidden: isHidden, weight } of buildTopLevelEdges(graph, nodeToGroup, flowNodes, hidden)) {
+        topG.setEdge(srcTopId, tgtTopId, { weight: weight * (isHidden ? 1 : DRAWN_EDGE_WEIGHT) });
     }
 
     try { dagre.layout(topG); } catch (e) {
@@ -896,17 +1542,48 @@ export function arrangeDagreGroups(graph) {
 
     // ── Phase 3: Apply positions ───────────────────────────────────
 
-    for (const group of topLevelGroups) {
-        const dn = topG.node("group_" + group.id);
+    // Dagre centres every step across the flow, so blocks of different sizes
+    // zigzag. Keep its steps and its order inside each step, but start every
+    // step at the same edge (top in LR, left in TB) and at the start of the
+    // step along the flow: the first block of each step sits on one straight
+    // line from start to finish.
+    const horizontal = settings.rankdir !== "TB";
+    const blocks = [
+        ...topLevelGroups.map((group) => {
+            const b = blockSizes.get(group);
+            return { id: "group_" + group.id, group, w: b.width, h: b.height };
+        }),
+        ...flowNodes.map((node) => ({ id: "node_" + node.id, node, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH })),
+    ];
+    const steps = new Map();
+    for (const b of blocks) {
+        const dn = topG.node(b.id);
         if (!dn) continue;
-        const s = groupSizes.get(group);
-        placeGroup(group, groupNodesMap.get(group) || [], dn.x - s.width / 2, dn.y - s.height / 2, s);
+        const key = Math.round(horizontal ? dn.x : dn.y);
+        if (!steps.has(key)) steps.set(key, []);
+        steps.get(key).push({ ...b, order: horizontal ? dn.y : dn.x });
     }
-
-    for (const node of ungroupedConnected) {
-        const dn = topG.node("node_" + node.id);
-        if (!dn) continue;
-        node.pos = [dn.x - node.size[0] / 2, dn.y - (node.size[1] + titleH) / 2 + titleH];
+    // TB with tbAlign "right": every step ends at the same right edge instead.
+    const crossOf = (st) => st.reduce((s, b) => s + (horizontal ? b.h : b.w) + settings.nodesep, -settings.nodesep);
+    const alignEnd = !horizontal && settings.tbAlign === "right";
+    const endEdge = MARGIN + Math.max(0, ...[...steps.values()].map(crossOf));
+    let u = MARGIN;
+    for (const key of [...steps.keys()].sort((a, b) => a - b)) {
+        const step = steps.get(key).sort((a, b) => a.order - b.order);
+        let v = alignEnd ? endEdge - crossOf(step) : MARGIN, mainMax = 0;
+        for (const b of step) {
+            const [x, y] = horizontal ? [u, v] : [v, u];
+            if (b.group) {
+                const s = groupSizes.get(b.group);
+                placeGroup(b.group, groupNodesMap.get(b.group) || [], x, y, s);
+                sats.place(b.group, x, y, s);
+            } else {
+                b.node.pos = [x, y + titleH];
+            }
+            v += (horizontal ? b.h : b.w) + settings.nodesep;
+            mainMax = Math.max(mainMax, horizontal ? b.w : b.h);
+        }
+        u += mainMax + settings.ranksep;
     }
 
     const allPositioned = [
@@ -936,241 +1613,349 @@ function computeElkPorts(node, nodeId) {
     const ports = [];
     const titleH = TITLE_HEIGHT();
     const slotH = globalThis.LiteGraph?.NODE_SLOT_HEIGHT || 20;
+    const [w, h] = sizeOf(node);
+    // A collapsed node draws every link at its title bar.
+    const slotY = (i) => (h === 0 ? titleH / 2 : titleH + i * slotH + slotH / 2);
 
     for (let i = 0; i < (node.inputs || []).length; i++) {
         ports.push({
             id: nodeId + "_in_" + i,
             layoutOptions: { "elk.port.side": "WEST" },
-            x: 0, y: titleH + i * slotH + slotH / 2, width: 1, height: 1,
+            x: 0, y: slotY(i), width: 1, height: 1,
         });
     }
     for (let i = 0; i < (node.outputs || []).length; i++) {
         ports.push({
             id: nodeId + "_out_" + i,
             layoutOptions: { "elk.port.side": "EAST" },
-            x: node.size[0], y: titleH + i * slotH + slotH / 2, width: 1, height: 1,
+            x: w, y: slotY(i), width: 1, height: 1,
         });
     }
     return ports;
 }
 
+/** Target width / height of the Advanced layout's block area. */
+const TARGET_ASPECT = 16 / 9;
+
+/**
+ * Lay out a set of nodes with ELK's layered algorithm, placing them from the
+ * origin. Left-to-right: every slot is an ELK port at its real position
+ * (inputs west, outputs east) and hidden links attach to extra title-bar
+ * ports. Top-to-bottom: no ports -- LiteGraph slots sit on the sides, and
+ * fixing them there while layers run downwards turns every chain into a
+ * diagonal staircase -- so edges join the nodes directly.
+ *
+ * @param {Array<Object>} nodes - Nodes to lay out.
+ * @param {Object} graph - Graph (for its links).
+ * @param {Array<{origin_id: *, target_id: *}>} hidden - Hidden links (`collectHiddenLinks`).
+ * @param {Object} settings - Layout settings.
+ * @returns {Promise<boolean>} False when ELK failed (nodes left where they were).
+ */
+async function runElkLayout(nodes, graph, hidden, settings) {
+    if (nodes.length === 0) return true;
+    const titleH = TITLE_HEIGHT();
+    const horizontal = settings.rankdir !== "TB";
+    const ids = new Set(nodes.map((n) => n.id));
+    const elkId = (id) => "n_" + id;
+
+    const links = Object.values(graph.links || {}).filter((l) => l && ids.has(l.origin_id) && ids.has(l.target_id));
+    const hid = hidden.filter((l) => ids.has(l.origin_id) && ids.has(l.target_id));
+    const hiddenSources = new Set(hid.map((l) => l.origin_id));
+    const hiddenTargets = new Set(hid.map((l) => l.target_id));
+
+    const children = nodes.map((node) => {
+        const id = elkId(node.id);
+        const child = { id, width: sizeOf(node)[0], height: sizeOf(node)[1] + titleH };
+        if (horizontal) {
+            const ports = computeElkPorts(node, id);
+            if (hiddenTargets.has(node.id)) {
+                ports.push({ id: id + "_hin", layoutOptions: { "elk.port.side": "WEST" }, x: 0, y: titleH / 2, width: 1, height: 1 });
+            }
+            if (hiddenSources.has(node.id)) {
+                ports.push({ id: id + "_hout", layoutOptions: { "elk.port.side": "EAST" }, x: sizeOf(node)[0], y: titleH / 2, width: 1, height: 1 });
+            }
+            child.ports = ports;
+            child.layoutOptions = { "elk.portConstraints": "FIXED_POS" };
+        }
+        return child;
+    });
+
+    const edges = [];
+    links.forEach((l, i) => {
+        edges.push(horizontal
+            ? { id: "e" + i, sources: [elkId(l.origin_id) + "_out_" + (l.origin_slot ?? 0)], targets: [elkId(l.target_id) + "_in_" + (l.target_slot ?? 0)] }
+            : { id: "e" + i, sources: [elkId(l.origin_id)], targets: [elkId(l.target_id)] });
+    });
+    hid.forEach((l, i) => {
+        edges.push(horizontal
+            ? { id: "h" + i, sources: [elkId(l.origin_id) + "_hout"], targets: [elkId(l.target_id) + "_hin"] }
+            : { id: "h" + i, sources: [elkId(l.origin_id)], targets: [elkId(l.target_id)] });
+    });
+
+    let result;
+    try {
+        result = await new window.ELK().layout({
+            id: "root",
+            layoutOptions: {
+                "elk.algorithm": "layered",
+                "elk.direction": RANKDIR_TO_ELK[settings.rankdir] || "RIGHT",
+                "elk.spacing.nodeNode": String(settings.nodesep),
+                "elk.layered.spacing.nodeNodeBetweenLayers": String(settings.ranksep),
+                "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
+                // Unlinked chains are separate components: pack them in the
+                // order given (`sortChainsByFlow`). Node order inside a chain
+                // is left to crossing minimisation.
+                "elk.layered.considerModelOrder.components": "MODEL_ORDER",
+            },
+            children,
+            edges,
+        });
+    } catch (e) {
+        console.error("[EnhancementUtils] ELK layout failed:", e);
+        return false;
+    }
+
+    const placed = new Map((result.children || []).map((c) => [c.id, c]));
+    for (const node of nodes) {
+        const c = placed.get(elkId(node.id));
+        if (c) node.pos = [c.x || 0, (c.y || 0) + titleH];
+    }
+    return true;
+}
+
+/**
+ * Order the blocks inside each layer to reduce crossings: barycenter sweeps
+ * (down using predecessors, up using successors). A block without neighbours
+ * in the reference layer keeps its place. Deterministic.
+ *
+ * @param {Array<Array<string>>} layers - Block ids per layer (start order).
+ * @param {Map<string, Array<string>>} preds - Forward-edge predecessors (from `rankBlocks`).
+ * @returns {Array<Array<string>>} Reordered layers.
+ */
+function orderLayers(layers, preds) {
+    const succs = new Map();
+    for (const [id, ps] of preds) for (const p of ps) (succs.get(p) || succs.set(p, []).get(p)).push(id);
+    const pos = new Map();
+    const index = () => layers.forEach((layer) => layer.forEach((id, i) => pos.set(id, i)));
+    index();
+    for (let sweep = 0; sweep < 4; sweep++) {
+        const down = sweep % 2 === 0;
+        const order = down ? layers.map((_, i) => i) : layers.map((_, i) => layers.length - 1 - i);
+        for (const li of order) {
+            const layer = layers[li];
+            if (layer.length < 2) continue;
+            const keyed = layer.map((id, i) => {
+                const ns = ((down ? preds : succs).get(id) || []).filter((n) => pos.has(n));
+                const bary = ns.length ? ns.reduce((s, n) => s + pos.get(n), 0) / ns.length : i;
+                return { id, i, bary };
+            });
+            keyed.sort((a, b) => (a.bary - b.bary) || (a.i - b.i));
+            layers[li] = keyed.map((k) => k.id);
+            layers[li].forEach((id, i) => pos.set(id, i));
+        }
+    }
+    return layers;
+}
+
+/**
+ * Place layers of blocks along the flow direction, wrapped into rows like
+ * lines of text: every row runs with the flow and starts again at the
+ * beginning (rows that alternated direction made every link in a backwards
+ * row enter its node from the far side, and in TB put single groups at the
+ * bottom of their column). The number of rows is the one whose bounding box
+ * is closest to `aspect`; layers are split into rows of near-equal length.
+ * Coordinates start at the origin.
+ *
+ * Left-to-right: layers are columns, rows stack downwards. Top-to-bottom:
+ * layers are rows, bands stack to the right, each starting at the top.
+ *
+ * @param {Array<Array<{id: string, w: number, h: number}>>} layers - Blocks per layer, in order.
+ * @param {{horizontal: boolean, layerGap: number, itemGap: number, rowGap: number, aspect: number}} opts
+ * @returns {{ pos: Map<string, {x: number, y: number}>, width: number, height: number, rows: number }}
+ */
+export function placeWrappedLayers(layers, opts) {
+    const { horizontal, layerGap, itemGap, rowGap, aspect } = opts;
+    const main = (b) => (horizontal ? b.w : b.h);
+    const cross = (b) => (horizontal ? b.h : b.w);
+    const lm = layers.map((l) => Math.max(0, ...l.map(main)));
+    const lc = layers.map((l) => l.reduce((s, b) => s + cross(b), 0) + itemGap * Math.max(0, l.length - 1));
+
+    /** Split layers greedily into rows no longer than `limit`. */
+    const pack = (limit) => {
+        const rows = [];
+        let row = [], len = 0;
+        lm.forEach((m, i) => {
+            const add = row.length ? layerGap + m : m;
+            if (row.length && len + add > limit + 1e-6) { rows.push(row); row = []; len = 0; }
+            len += row.length ? layerGap + m : m;
+            row.push(i);
+        });
+        if (row.length) rows.push(row);
+        return rows;
+    };
+    const rowMain = (row) => row.reduce((s, i) => s + lm[i], 0) + layerGap * (row.length - 1);
+    const rowCross = (row) => Math.max(0, ...row.map((i) => lc[i]));
+
+    let best = null;
+    const total = rowMain(lm.map((_, i) => i));
+    const longest = Math.max(0, ...lm);
+    for (let r = 1; r <= layers.length; r++) {
+        // Shortest row length that fits in r rows.
+        let lo = longest, hi = Math.max(total, longest);
+        for (let k = 0; k < 40 && hi - lo > 0.5; k++) {
+            const mid = (lo + hi) / 2;
+            if (pack(mid).length <= r) hi = mid; else lo = mid;
+        }
+        const rows = pack(hi);
+        if (best && rows.length === best.rows.length) continue;
+        const mainExt = Math.max(...rows.map(rowMain));
+        const crossExt = rows.reduce((s, row) => s + rowCross(row), 0) + rowGap * (rows.length - 1);
+        const [w, h] = horizontal ? [mainExt, crossExt] : [crossExt, mainExt];
+        const score = Math.abs(Math.log(Math.max(w, 1) / Math.max(h, 1) / aspect));
+        if (!best || score < best.score - 1e-9) best = { rows, score, mainExt, crossExt, w, h };
+    }
+    if (!best) return { pos: new Map(), width: 0, height: 0, rows: 0 };
+
+    const pos = new Map();
+    let v = 0;
+    for (const row of best.rows) {
+        let u = 0;
+        for (const li of row) {
+            let c = v;
+            for (const b of layers[li]) {
+                const bu = u; // Aligned to the start of the step (left in LR, top in TB).
+                pos.set(b.id, horizontal ? { x: bu, y: c } : { x: c, y: bu });
+                c += cross(b) + itemGap;
+            }
+            u += lm[li] + layerGap;
+        }
+        v += rowCross(row) + rowGap;
+    }
+    return { pos, width: best.w, height: best.h, rows: best.rows.length };
+}
+
 /**
  * Arrange nodes using ELK's layered (Sugiyama) algorithm.
  *
- * Features:
- * - Port-aware: models each input/output slot as an ELK port with FIXED_POS.
- * - Native hierarchy: groups become parent nodes with children (auto-detected).
- * - Crossing minimization via layer sweep.
- * - Async: won't freeze the UI on large graphs.
- * - Disconnected nodes laid out in a grid below.
+ * Without groups: one port-aware ELK layout of all connected nodes.
+ * With groups (two passes):
+ * 1. Each group's connected members are laid out by ELK on their own
+ *    (unconnected members in a grid below them inside the group).
+ * 2. Groups and ungrouped connected nodes are blocks; drawn and hidden links
+ *    between them give layers (`rankBlocks`) and the order inside a layer
+ *    (`orderLayers`). The layers are wrapped into rows (like text) aiming at a
+ *    16:9 overall shape (`placeWrappedLayers`).
+ * 3. Blocks with no link to any other block (standalone groups) go in a grid
+ *    below, then ungrouped unconnected nodes below everything.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {{ rankdir?: string }} [options] - `rankdir` "LR" / "TB" overrides the setting.
+ * @returns {Promise<void>}
  */
-export async function arrangeELK(graph) {
+export async function arrangeELK(graph, options) {
     if (!window.ELK) { console.error("[EnhancementUtils] ELK not loaded."); return; }
 
     const allNodes = graph._nodes || [];
     if (allNodes.length === 0) return;
 
-    const settings = getSettings();
+    const settings = getSettings(options);
     const titleH = TITLE_HEIGHT();
     const padding = settings.groupPadding;
-    const elkDir = RANKDIR_TO_ELK[settings.rankdir] || "RIGHT";
+    const hidden = collectHiddenLinks(graph);
+    const flow = computeFlowOrder(graph, hidden);
 
-    // ── Group detection ────────────────────────────────────────────
+    // ── No groups: one ELK layout ──────────────────────────────────
 
-    const groups = graph._groups || [];
-    const useGroups = groups.length > 0;
-
-    let topLevelGroups = [], groupNodesMap = new Map(), nodeToGroup = new Map();
-    if (useGroups) {
-        const resolved = resolveGroups(graph);
-        topLevelGroups = resolved.topLevelGroups;
-        groupNodesMap = resolved.groupNodesMap;
-        nodeToGroup = resolved.nodeToGroup;
-    }
-
-    // Grouped nodes stay in their group whether connected or not; only
-    // ungrouped unconnected nodes go to the grid below.
-    const { connected, disconnected } = partitionNodes(allNodes);
-    const ungroupedDisconnected = disconnected.filter((n) => !nodeToGroup.has(n.id));
-    if (connected.length === 0 && topLevelGroups.length === 0) {
-        layoutDisconnectedNodes(disconnected, 0);
+    if ((graph._groups || []).length === 0) {
+        const { connected, disconnected } = partitionNodes(allNodes);
+        if (connected.length > 0 && !(await runElkLayout(sortChainsByFlow(connected, flow, graph, hidden), graph, hidden, settings))) return;
+        layoutDisconnectedNodes(disconnected, connected.length ? getGraphBottom(connected) : 0);
+        positionSubgraphIO(graph);
+        if (typeof graph.change === "function") graph.change();
         graph.setDirtyCanvas(true, true);
         return;
     }
 
-    // ── Shared layout options for layered algorithm ────────────────
+    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolveGroups(graph);
+    const { connected: ungroupedConnected, disconnected } = partitionNodes(ungroupedNodes);
 
-    const layeredOptions = {
-        "elk.algorithm": "layered",
-        "elk.direction": elkDir,
-        "elk.spacing.nodeNode": String(settings.nodesep),
-        "elk.layered.spacing.nodeNodeBetweenLayers": String(settings.ranksep),
-        "elk.layered.crossingMinimization.strategy": "LAYER_SWEEP",
-        "elk.portConstraints": "FIXED_POS",
-    };
+    // ── Phase 1: ELK inside each group ─────────────────────────────
 
-    // ── Build ELK graph ────────────────────────────────────────────
+    const groupSizes = new Map();
+    for (const group of topLevelGroups) {
+        const nodes = groupNodesMap.get(group) || [];
+        const { connected } = partitionNodes(nodes);
+        const withBridges = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
+        if (!(await runElkLayout(sortChainsByFlow(connected, flow, graph, withBridges), graph, withBridges, settings))) return;
+        // Connected members are already placed; this adds the grid of
+        // unconnected ones and stores the group-relative offsets.
+        groupSizes.set(group, layoutGroupContents(group, nodes, padding, () => {}));
+    }
 
-    const elkGraph = {
-        id: "root",
-        layoutOptions: { ...layeredOptions },
-        children: [],
-        edges: [],
-    };
+    // ── Phase 2: Blocks in wrapped rows ────────────────────────────
 
-    const nodeIdToElk = new Map();
-    const connectedIds = new Set(connected.map((n) => n.id));
-
-    const buildElkNode = (node) => {
-        const elkId = "n_" + node.id;
-        nodeIdToElk.set(node.id, elkId);
-        return {
-            id: elkId,
-            width: node.size[0],
-            height: node.size[1] + titleH,
-            ports: computeElkPorts(node, elkId),
-            layoutOptions: { "elk.portConstraints": "FIXED_POS" },
-        };
-    };
-
-    const buildElkEdge = (link, idPrefix, idx) => {
-        const srcElk = nodeIdToElk.get(link.origin_id);
-        const tgtElk = nodeIdToElk.get(link.target_id);
-        if (!srcElk || !tgtElk) return null;
-        return {
-            id: idPrefix + idx,
-            sources: [srcElk + "_out_" + (link.origin_slot ?? 0)],
-            targets: [tgtElk + "_in_" + (link.target_slot ?? 0)],
-        };
-    };
-
-    /** Grid blocks of unconnected group members: elk id -> nodes with block-relative offsets. */
+    const sats = findSatellites(graph, nodeToGroup, ungroupedConnected, hidden, settings.nodesep);
+    const flowNodes = ungroupedConnected.filter((n) => !sats.ids.has(n.id));
     const blocks = new Map();
-
-    // Build hierarchy.
-    if (useGroups && topLevelGroups.length > 0) {
-        const groupedNodeIds = new Set();
-        const allLinks = Object.values(graph.links || {});
-
-        for (const group of topLevelGroups) {
-            const members = groupNodesMap.get(group) || [];
-            const nodes = members.filter((n) => connectedIds.has(n.id));
-            const loose = members.filter((n) => !connectedIds.has(n.id));
-
-            // Empty group: a plain box of its current size.
-            if (members.length === 0) {
-                elkGraph.children.push({ id: "g_" + group.id, width: group.size[0], height: group.size[1] });
-                continue;
-            }
-
-            const gTitleH = groupTitleHeight(group);
-            const groupElk = {
-                id: "g_" + group.id,
-                layoutOptions: {
-                    ...layeredOptions,
-                    "elk.padding": `[top=${padding + gTitleH},left=${padding},bottom=${padding},right=${padding}]`,
-                },
-                children: [],
-                edges: [],
-            };
-
-            const groupNodeIds = new Set();
-            for (const node of nodes) {
-                groupElk.children.push(buildElkNode(node));
-                groupedNodeIds.add(node.id);
-                groupNodeIds.add(node.id);
-            }
-
-            // Unconnected members: laid out as a grid first and passed to ELK
-            // as one box, so they stay inside the group.
-            if (loose.length > 0) {
-                layoutDisconnectedNodes(loose, 0, 0);
-                const b = getNodesBounds(loose);
-                const blockId = "b_" + group.id;
-                blocks.set(blockId, loose.map((node) => ({ node, dx: node.pos[0] - b.minX, dy: node.pos[1] - b.minY })));
-                groupElk.children.push({ id: blockId, width: b.maxX - b.minX, height: b.maxY - b.minY });
-            }
-
-            // Intra-group edges.
-            let ei = 0;
-            for (const link of allLinks) {
-                if (!link) continue;
-                if (groupNodeIds.has(link.origin_id) && groupNodeIds.has(link.target_id)) {
-                    const edge = buildElkEdge(link, "ge_" + group.id + "_", ei++);
-                    if (edge) groupElk.edges.push(edge);
-                }
-            }
-
-            elkGraph.children.push(groupElk);
-        }
-
-        // Ungrouped connected nodes at root level.
-        for (const node of connected) {
-            if (!groupedNodeIds.has(node.id)) elkGraph.children.push(buildElkNode(node));
-        }
-    } else {
-        for (const node of connected) elkGraph.children.push(buildElkNode(node));
+    for (const group of topLevelGroups) {
+        const s = sats.size(group, groupSizes.get(group));
+        blocks.set("group_" + group.id, { id: "group_" + group.id, group, w: s.width, h: s.height });
     }
+    for (const node of flowNodes) {
+        blocks.set("node_" + node.id, { id: "node_" + node.id, node, w: sizeOf(node)[0], h: sizeOf(node)[1] + titleH });
+    }
+    const edges = buildTopLevelEdges(graph, nodeToGroup, flowNodes, hidden);
+    const linked = new Set(edges.flatMap((e) => [e.srcTopId, e.tgtTopId]));
+    const flowIds = [...blocks.keys()].filter((id) => linked.has(id));
+    const standalone = [...blocks.values()].filter((b) => !linked.has(b.id));
 
-    // Root-level edges (cross-group + ungrouped).
-    let rei = 0;
-    for (const link of Object.values(graph.links || {})) {
-        if (!link) continue;
-        if (useGroups) {
-            const sg = nodeToGroup.get(link.origin_id), tg = nodeToGroup.get(link.target_id);
-            if (sg && tg && sg === tg) continue; // Already added as intra-group.
+    /** Put a block's top-left corner at (x, y). */
+    const placeBlock = (b, x, y) => {
+        if (b.group) {
+            const s = groupSizes.get(b.group);
+            placeGroup(b.group, groupNodesMap.get(b.group) || [], x, y, s);
+            sats.place(b.group, x, y, s);
+        } else {
+            b.node.pos = [x, y + titleH];
         }
-        const edge = buildElkEdge(link, "re_", rei++);
-        if (edge) elkGraph.edges.push(edge);
-    }
-
-    // ── Run ELK ────────────────────────────────────────────────────
-
-    let result;
-    try {
-        const elk = new window.ELK();
-        result = await elk.layout(elkGraph);
-    } catch (e) {
-        console.error("[EnhancementUtils] ELK layout failed:", e);
-        return;
-    }
-
-    // ── Apply positions ────────────────────────────────────────────
-
-    // Walk the result tree to compute absolute positions.
-    const elkMap = new Map();
-    const walk = (node, px = 0, py = 0) => {
-        const ax = (node.x || 0) + px, ay = (node.y || 0) + py;
-        elkMap.set(node.id, { ...node, absX: ax, absY: ay });
-        for (const child of node.children || []) walk(child, ax, ay);
     };
-    for (const child of result.children || []) walk(child);
 
-    for (const node of connected) {
-        const er = elkMap.get(nodeIdToElk.get(node.id));
-        if (er) { node.pos = [er.absX, er.absY + titleH]; }
+    let bottom = 0, right = 0;
+    if (flowIds.length > 0) {
+        const ranked = rankBlocks(flowIds, edges);
+        const layers = [];
+        for (const id of flowIds) (layers[ranked.level.get(id)] ??= []).push(id);
+        const ordered = orderLayers(layers.filter(Boolean), ranked.preds);
+        const wrapped = placeWrappedLayers(ordered.map((l) => l.map((id) => blocks.get(id))), {
+            horizontal: settings.rankdir !== "TB",
+            layerGap: settings.ranksep,
+            itemGap: settings.nodesep,
+            rowGap: settings.ranksep,
+            aspect: TARGET_ASPECT,
+        });
+        for (const [id, p] of wrapped.pos) placeBlock(blocks.get(id), p.x, p.y);
+        bottom = wrapped.height;
+        right = wrapped.width;
     }
 
-    for (const [blockId, entries] of blocks) {
-        const er = elkMap.get(blockId);
-        if (!er) continue;
-        for (const { node, dx, dy } of entries) node.pos = [er.absX + dx, er.absY + dy];
-    }
+    // ── Phase 3: Standalone blocks, then unconnected nodes, below ──
 
-    if (useGroups) {
-        for (const group of topLevelGroups) {
-            const er = elkMap.get("g_" + group.id);
-            if (!er) continue;
-            group.pos = [er.absX, er.absY];
-            // Empty groups keep their size; others fit their content (same minimum as the other layouts).
-            if ((groupNodesMap.get(group) || []).length > 0) {
-                group.size = [Math.max(140, er.width || 140), Math.max(80, er.height || 80)];
-            }
+    if (standalone.length > 0) {
+        const rowLimit = Math.max(right, ...standalone.map((b) => b.w));
+        let x = 0, y = flowIds.length > 0 ? bottom + settings.ranksep * 2 : 0, rowH = 0;
+        for (const b of standalone) {
+            if (x > 0 && x + b.w > rowLimit) { x = 0; y += rowH + settings.nodesep; rowH = 0; }
+            placeBlock(b, x, y);
+            x += b.w + settings.nodesep;
+            rowH = Math.max(rowH, b.h);
         }
     }
 
-    const placedNodes = allNodes.filter((n) => connectedIds.has(n.id) || nodeToGroup.has(n.id));
-    layoutDisconnectedNodes(ungroupedDisconnected, getLayoutBottom(placedNodes, topLevelGroups));
+    const allPositioned = [
+        ...ungroupedConnected,
+        ...topLevelGroups.flatMap((g) => groupNodesMap.get(g) || []),
+    ];
+    layoutDisconnectedNodes(disconnected, getLayoutBottom(allPositioned, topLevelGroups), 0);
     positionSubgraphIO(graph);
     if (typeof graph.change === "function") graph.change();
     graph.setDirtyCanvas(true, true);
