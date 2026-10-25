@@ -84,7 +84,7 @@ https://github.com/user-attachments/assets/1dd604bc-3aee-423a-ac0f-2da600f32377
 <details>
 <summary>How it works</summary>
 
-- **Colours** -- each node's colour comes from how far it is from the start. A long red-to-violet link is something made early and used late (e.g. a VAE).
+- **Colours** -- each node's colour comes from how far it is from the start. A long red-to-violet link is something made early and used late (e.g. a VAE). Small arrows along each link show which way data flows.
 - **Hidden connections** -- Set/Get nodes and [Use Everywhere](https://github.com/chrisgoringe/cg-use-everywhere) are followed and drawn as dashed links. Reroutes, bypassed nodes and subgraphs are followed too, and it works with links hidden.
 - **Greyed out** -- muted nodes, branches that don't reach an output, and outputs that would fail because a required input is cut off.
 - **Switches** -- nodes that only run the branch they pick get a diamond badge. Nodes that may not run because of a switch get a faded outline and a **?**. Select one to see which switch it depends on; right-click > **Go to gating switch** jumps there.

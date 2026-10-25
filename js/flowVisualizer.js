@@ -12,6 +12,7 @@
  *
  * Visual vocabulary (one meaning per style):
  *   - dashed line          -- ghost link (Set/Get style virtual hop, no noodle)
+ *   - open chevrons (>)    -- flow direction, repeated along every link / ghost
  *   - hollow diamond       -- lazy input (at the link's target end / switch slot)
  *   - diamond badge        -- switch node (has active lazy inputs)
  *   - "?" badge + faint outline -- conditional node (may not run)
@@ -134,6 +135,13 @@ const BADGE_SCREEN_PX = 14;
 const LAZY_DIAMOND_SCREEN_PX = 5;
 /** At extreme zoom-out, marks stop growing in graph units past this multiple (they shrink on screen). */
 const BADGE_MAX_SCALE = 4;
+/** Target screen distance between direction chevrons on a link (spread evenly, so actual spacing varies). */
+const ARROW_SPACING_SCREEN_PX = 160;
+/** Chevron-free zone at each end of a link, screen px (slot dots, lazy diamonds, the bend out of a slot). */
+const ARROW_END_MARGIN_SCREEN_PX = 24;
+/** Chevron arm length: this multiple of the stroke width, at least ARROW_MIN_ARM_SCREEN_PX. */
+const ARROW_ARM_WIDTHS = 2.5;
+const ARROW_MIN_ARM_SCREEN_PX = 6;
 /**
  * How long a newly executing node must keep running before the trace
  * switches to it (ms). The ring follows immediately; this only stops a run of
@@ -1538,6 +1546,67 @@ function strokeFullPath(ctx, g) {
         return;
     }
     strokeSubPath(ctx, g, 0, g.len);
+}
+
+/** Chevron arm direction relative to the link: ~40 degrees off the backward tangent. */
+const ARROW_COS = Math.cos((40 * Math.PI) / 180);
+const ARROW_SIN = Math.sin((40 * Math.PI) / 180);
+
+/**
+ * Stroke open chevrons (">") pointing along a polyline, one every
+ * ARROW_SPACING_SCREEN_PX on screen, spread evenly between the end margins.
+ * Uses the context's current stroke style and line width and draws solid
+ * (the caller's line dash is cleared and restored). With an on/off line dash
+ * set (ghost links), each tip snaps to the nearest dash end, so the chevron
+ * reads as that dash's arrowhead (`-->  -->`); the dash pattern starts at arc
+ * length 0 of the same polyline, so dash k ends at `k * period + on`. Links
+ * too short to clear both margins get none.
+ *
+ * @param {CanvasRenderingContext2D} ctx - Target context (graph transform).
+ * @param {Object} g - Geometry entry.
+ * @param {number} scale - Canvas zoom.
+ * @returns {void}
+ */
+function strokeArrows(ctx, g, scale) {
+    const { pts, cum, n, len } = g;
+    if (n < 2) return;
+    const margin = ARROW_END_MARGIN_SCREEN_PX / scale;
+    const usable = len - 2 * margin;
+    if (usable <= 0) return;
+    const count = Math.max(1, Math.round(usable / (ARROW_SPACING_SCREEN_PX / scale)));
+    const arm = Math.max(ARROW_MIN_ARM_SCREEN_PX / scale, ctx.lineWidth * ARROW_ARM_WIDTHS);
+    const ax = arm * ARROW_COS;
+    const ay = arm * ARROW_SIN;
+    const dash = ctx.getLineDash();
+    const dashOn = dash.length === 2 ? dash[0] : 0;
+    const dashPeriod = dashOn > 0 ? dash[0] + dash[1] : 0;
+    ctx.beginPath();
+    for (let k = 0; k < count; k++) {
+        // Chevron centred on its slot: the tip sits half its depth ahead.
+        let tipS = margin + (usable * (k + 0.5)) / count + ax * 0.5;
+        if (dashPeriod > 0) tipS = Math.round((tipS - dashOn) / dashPeriod) * dashPeriod + dashOn;
+        if (tipS <= 0 || tipS >= len) continue;
+        const i = findSegmentIndex(cum, n, tipS);
+        const x0 = pts[2 * i];
+        const y0 = pts[2 * i + 1];
+        const dx = pts[2 * i + 2] - x0;
+        const dy = pts[2 * i + 3] - y0;
+        const segLen = Math.hypot(dx, dy);
+        if (segLen < 1e-6) continue;
+        const ux = dx / segLen;
+        const uy = dy / segLen;
+        const f = (tipS - cum[i]) / segLen;
+        const tx = x0 + dx * f;
+        const ty = y0 + dy * f;
+        const bx = tx - ux * ax;
+        const by = ty - uy * ax;
+        ctx.moveTo(bx - uy * ay, by + ux * ay);
+        ctx.lineTo(tx, ty);
+        ctx.lineTo(bx + uy * ay, by - ux * ay);
+    }
+    if (dash.length) ctx.setLineDash([]);
+    ctx.stroke();
+    if (dash.length) ctx.setLineDash(dash);
 }
 
 /**
@@ -3537,6 +3606,7 @@ function drawSteadyLinks(ctx, maxDepth, lw, scale, dim) {
             ctx.lineWidth = it.ghost ? lw * 0.75 : lw;
         }
         strokeFullPath(ctx, it.geom);
+        strokeArrows(ctx, it.geom, scale);
     }
     ctx.setLineDash(noDash);
 }
