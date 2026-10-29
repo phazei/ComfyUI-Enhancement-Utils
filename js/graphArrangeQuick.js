@@ -3,8 +3,8 @@
  */
 
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
-import { collectHiddenLinks, collectBridgeLinks, computeFlowOrder, chainRanks, rankBlocks } from "./graphArrangeFlow.js";
-import { resolveGroups, layoutGroupContents, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
+import { collectHiddenLinks, computeFlowOrder, chainRanks, rankBlocks } from "./graphArrangeFlow.js";
+import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
 import { foldChains } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -144,13 +144,29 @@ export function arrangeFloatRight(graph) {
 }
 
 /**
+ * Quick's layout of one group's connected items (see `layoutGroupTree`).
+ *
+ * @returns {import("./graphArrangeGroups.js").GroupEngine}
+ */
+export function quickGroupEngine() {
+    return (items, view) => {
+        floatRightLayout(items, view.graph, new Set(items.map((n) => n.id)), view.hidden, view.flow);
+        foldChains(items, [...Object.values(view.graph.links || {}), ...view.hidden], { horizontal: true, along: MARGIN, across: MARGIN });
+    };
+}
+
+/**
  * Arrange nodes using float-right respecting group boundaries.
  *
- * Phase 1: Float-right layout within each group.
+ * Phase 1: Float-right layout within each group (nested groups first, then
+ *          as blocks in their parent).
  * Phase 2: Assign groups to columns based on inter-group edges, position groups.
  * Phase 3: Disconnected nodes in a grid below.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @returns {Promise<void>}
  */
-export function arrangeFloatRightGroups(graph) {
+export async function arrangeFloatRightGroups(graph) {
     const allNodes = graph._nodes || [];
     const groups = graph._groups || [];
     if (allNodes.length === 0) return;
@@ -164,7 +180,8 @@ export function arrangeFloatRightGroups(graph) {
     const padding = settings.groupPadding;
     const titleH = TITLE_HEIGHT();
 
-    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolveGroups(graph);
+    const resolved = resolveGroups(graph);
+    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolved;
     const { connected: ungroupedConnected, disconnected } = partitionNodes(ungroupedNodes);
     const hidden = collectHiddenLinks(graph);
     const flow = computeFlowOrder(graph, hidden);
@@ -172,14 +189,9 @@ export function arrangeFloatRightGroups(graph) {
     // ── Phase 1: Layout within each group ──────────────────────────
 
     const groupSizes = new Map();
-
+    const engine = quickGroupEngine();
     for (const group of topLevelGroups) {
-        const nodes = groupNodesMap.get(group) || [];
-        groupSizes.set(group, layoutGroupContents(group, nodes, padding, (gc) => {
-            const links = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
-            floatRightLayout(gc, graph, new Set(gc.map((n) => n.id)), links, flow);
-            foldChains(gc, [...Object.values(graph.links || {}), ...links], { horizontal: true, along: MARGIN, across: MARGIN });
-        }));
+        groupSizes.set(group, await layoutGroupTree(graph, group, resolved, { padding, hidden, flow }, engine));
     }
 
     // ── Phase 2: Position groups as columns ────────────────────────

@@ -282,6 +282,8 @@ Turn it on and the canvas follows the running node as the workflow runs, opening
 
 **Right-click the canvas > Arrange** to auto-layout the graph (or subgraph) you're viewing. Groups are kept together.
 
+Right-click inside a group and the menu reads **Arrange (Group)**: only that group is arranged. Anything it would now run into moves aside, and everything else stays where you put it.
+
 <img src="docs/images/arrange_menu.png" width="450" alt="Arrange submenu in the canvas right-click menu">
 
 | Option | |
@@ -323,13 +325,15 @@ Turn it on and the canvas follows the running node as the workflow runs, opening
 <details>
 <summary>More details</summary>
 
-- Nodes in a group are arranged inside it, then groups are arranged as blocks. Nested groups count as part of their outer group and are fitted around their own nodes afterwards. Empty groups keep their size.
+- Nodes in a group are arranged inside it, then groups are arranged as blocks. A group inside another group is arranged first and then moves as one block within its outer group. Empty groups keep their size.
+- **Arrange (Group)** uses the innermost group under the cursor. Its top-left corner stays put and its frame resizes to fit. Groups inside it keep their own layout. Items it would run into move right or down (as a whole, if they're groups), using free space first. An outer group grows if needed.
+- **Arrange (Group)** only unpins the group's own nodes and the groups directly inside it. Items that get pushed aside keep their pin.
 - Hidden connections (Set/Get nodes, Use Everywhere) count when deciding what comes first, so groups linked only that way still line up in order. When groups feed each other, the side with more connections goes first.
 - A node outside a group that only takes from that group and feeds back into it is placed right next to the group.
 - Loose nodes outside groups (Get nodes, loaders) sit next to what they connect to.
 - Long chains inside a group (a run of LoRA loaders) are folded: short neighbours stack, and in Top-Bottom a very tall chain wraps into rows.
 - Nodes with no connections go in a grid below the graph (or inside their group, if they're in one). With Advanced, groups not connected to anything else go in a grid below too.
-- Arrange moves pinned nodes and groups too, and unpins them.
+- Arranging the whole graph moves pinned nodes and groups too, and unpins them.
 - Spacing and group padding are in **Settings > EnhUtils > Arrange**.
 
 </details>
@@ -501,7 +505,7 @@ ComfyUI-Enhancement-Utils/
     ├── canvasMenu.js              # Shared canvas menu block
     ├── graphArrange.js            # Graph Arrange (menu, settings)
     ├── graphArrangeLayout.js      # Graph Arrange layouts (re-exports graphArrange*.js:
-    │                              #   Quick, Smart, Advanced + shared / flow / groups)
+    │                              #   Quick, Smart, Advanced, one group + shared / flow / groups)
     ├── nodeNavigation.js          # Go to node, Follow execution
     ├── nodeSearch.js, nodeSearchMatch.js, nodeSearch.css
     ├── flowGraph.js               # Flow Visualizer model

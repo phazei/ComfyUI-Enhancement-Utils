@@ -12,6 +12,10 @@
  * Smart and Advanced each get a Left-Right and a Top-Bottom menu entry
  * (the direction is picked per run, not a setting).
  *
+ * Right-clicking inside a group turns the submenu into "Arrange (Group)":
+ * the same layouts, applied to that group only (innermost group under the
+ * cursor); the rest of the graph only moves to make room.
+ *
  * Settings (configurable via ComfyUI Settings panel):
  * - Node spacing                    -- affects Dagre and ELK
  * - Rank spacing                    -- affects Dagre and ELK
@@ -35,6 +39,8 @@ import {
     arrangeFloatRightGroups,
     arrangeDagreGroups,
     arrangeELK,
+    arrangeGroup,
+    groupAtPoint,
 } from "./graphArrangeLayout.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -81,6 +87,22 @@ function directionEntries(label, layout) {
     }));
 }
 
+/**
+ * Menu entries arranging only one group (same layouts as the full arrange).
+ *
+ * @param {Object} graph - Graph holding the group.
+ * @param {Object} group - Group that was right-clicked.
+ * @returns {Array<Object>} Menu entries.
+ */
+function groupEntries(graph, group) {
+    const run = (layout, rankdir) => () => arrangeGroup(graph, group, layout, { rankdir });
+    return [
+        { content: "Quick (column aligned)", callback: run("quick") },
+        ...DIRECTIONS.map(([suffix, rankdir]) => ({ content: `Smart (dagre) ${suffix}`, callback: run("smart", rankdir) })),
+        ...DIRECTIONS.map(([suffix, rankdir]) => ({ content: `Advanced (ELK) ${suffix}`, callback: run("advanced", rankdir) })),
+    ];
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Extension Registration
 // ═══════════════════════════════════════════════════════════════════════════
@@ -120,26 +142,39 @@ app.registerExtension({
 
         // ── Context Menu ───────────────────────────────────────────
 
-        // Shared Enhancement Utils block (see canvasMenu.js).
-        registerCanvasMenuSection(10, () => [{
-            content: "Arrange",
-            has_submenu: true,
-            submenu: {
-                options: [
-                    {
-                        content: "Center Graph (shift to 0,0)",
-                        callback: () => centerGraph(app.canvas.graph),
-                    },
-                    null, // separator
-                    {
-                        content: "Quick (column aligned)",
-                        callback: () => withPreservedCenter(app.canvas.graph,
-                            () => arrangeFloatRightGroups(app.canvas.graph)),
-                    },
-                    ...directionEntries("Smart (dagre)", arrangeDagreGroups),
-                    ...directionEntries("Advanced (ELK)", arrangeELK),
-                ],
-            },
-        }]);
+        // Shared Enhancement Utils block (see canvasMenu.js). Right-clicking
+        // inside a group arranges only that group (the innermost one there).
+        registerCanvasMenuSection(10, (canvas) => {
+            const graph = canvas?.graph;
+            const mouse = canvas?.graph_mouse;
+            const group = graph && mouse ? groupAtPoint(graph, mouse[0], mouse[1]) : null;
+            if (group) {
+                return [{
+                    content: "Arrange (Group)",
+                    has_submenu: true,
+                    submenu: { options: groupEntries(graph, group) },
+                }];
+            }
+            return [{
+                content: "Arrange",
+                has_submenu: true,
+                submenu: {
+                    options: [
+                        {
+                            content: "Center Graph (shift to 0,0)",
+                            callback: () => centerGraph(app.canvas.graph),
+                        },
+                        null, // separator
+                        {
+                            content: "Quick (column aligned)",
+                            callback: () => withPreservedCenter(app.canvas.graph,
+                                () => arrangeFloatRightGroups(app.canvas.graph)),
+                        },
+                        ...directionEntries("Smart (dagre)", arrangeDagreGroups),
+                        ...directionEntries("Advanced (ELK)", arrangeELK),
+                    ],
+                },
+            }];
+        });
     },
 });

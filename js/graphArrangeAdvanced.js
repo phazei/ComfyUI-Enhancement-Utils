@@ -6,8 +6,8 @@
  */
 
 import { TITLE_HEIGHT, getSettings, sizeOf, hasNoDrawnInput, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
-import { collectHiddenLinks, collectBridgeLinks, computeFlowOrder, sortChainsByFlow, rankBlocks } from "./graphArrangeFlow.js";
-import { resolveGroups, layoutGroupContents, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
+import { collectHiddenLinks, computeFlowOrder, sortChainsByFlow, rankBlocks } from "./graphArrangeFlow.js";
+import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
 import { orderLayers, placeWrappedLayers } from "./graphArrangeWrap.js";
 import { foldChains } from "./graphArrangeFold.js";
 
@@ -76,11 +76,14 @@ async function runElkLayout(nodes, graph, hidden, settings) {
     const hid = hidden.filter((l) => ids.has(l.origin_id) && ids.has(l.target_id));
     const hiddenSources = new Set(hid.map((l) => l.origin_id));
     const hiddenTargets = new Set(hid.map((l) => l.target_id));
+    // Nested-group blocks have no ports: edges attach to the block itself.
+    const blocks = new Set(nodes.filter((n) => n.isGroupBlock).map((n) => String(n.id)));
+    const end = (id, port) => (horizontal && !blocks.has(String(id)) ? elkId(id) + port : elkId(id));
 
     const children = nodes.map((node) => {
         const id = elkId(node.id);
         const child = { id, width: sizeOf(node)[0], height: sizeOf(node)[1] + titleH };
-        if (horizontal) {
+        if (horizontal && !node.isGroupBlock) {
             const ports = computeElkPorts(node, id);
             if (hiddenTargets.has(node.id)) {
                 ports.push({ id: id + "_hin", layoutOptions: { "elk.port.side": "WEST" }, x: 0, y: titleH / 2, width: 1, height: 1 });
@@ -96,14 +99,10 @@ async function runElkLayout(nodes, graph, hidden, settings) {
 
     const edges = [];
     links.forEach((l, i) => {
-        edges.push(horizontal
-            ? { id: "e" + i, sources: [elkId(l.origin_id) + "_out_" + (l.origin_slot ?? 0)], targets: [elkId(l.target_id) + "_in_" + (l.target_slot ?? 0)] }
-            : { id: "e" + i, sources: [elkId(l.origin_id)], targets: [elkId(l.target_id)] });
+        edges.push({ id: "e" + i, sources: [end(l.origin_id, "_out_" + (l.origin_slot ?? 0))], targets: [end(l.target_id, "_in_" + (l.target_slot ?? 0))] });
     });
     hid.forEach((l, i) => {
-        edges.push(horizontal
-            ? { id: "h" + i, sources: [elkId(l.origin_id) + "_hout"], targets: [elkId(l.target_id) + "_hin"] }
-            : { id: "h" + i, sources: [elkId(l.origin_id)], targets: [elkId(l.target_id)] });
+        edges.push({ id: "h" + i, sources: [end(l.origin_id, "_hout")], targets: [end(l.target_id, "_hin")] });
     });
 
     let result;
@@ -138,12 +137,28 @@ async function runElkLayout(nodes, graph, hidden, settings) {
 }
 
 /**
+ * Advanced's layout of one group's connected items (see `layoutGroupTree`).
+ *
+ * @param {Object} settings - Layout settings (`getSettings`).
+ * @returns {import("./graphArrangeGroups.js").GroupEngine} Resolves false when ELK failed.
+ */
+export function elkGroupEngine(settings) {
+    return async (items, view) => {
+        if (!(await runElkLayout(sortChainsByFlow(items, view.flow, view.graph, view.hidden), view.graph, view.hidden, settings))) return false;
+        foldChains(items, [...Object.values(view.graph.links || {}), ...view.hidden],
+            { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
+        return true;
+    };
+}
+
+/**
  * Arrange nodes using ELK's layered (Sugiyama) algorithm.
  *
  * Without groups: one port-aware ELK layout of all connected nodes.
  * With groups (two passes):
  * 1. Each group's connected members are laid out by ELK on their own
- *    (unconnected members in a grid below them inside the group).
+ *    (unconnected members in a grid below them inside the group); nested
+ *    groups first, then as port-less blocks in their parent.
  * 2. Groups and ungrouped connected nodes are blocks; drawn and hidden links
  *    between them give layers (`rankBlocks`) and the order inside a layer
  *    (`orderLayers`). The layers are wrapped into rows (like text) aiming at a
@@ -179,22 +194,18 @@ export async function arrangeELK(graph, options) {
         return;
     }
 
-    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolveGroups(graph);
+    const resolved = resolveGroups(graph);
+    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolved;
     const { connected: ungroupedConnected, disconnected } = partitionNodes(ungroupedNodes);
 
     // ── Phase 1: ELK inside each group ─────────────────────────────
 
     const groupSizes = new Map();
+    const engine = elkGroupEngine(settings);
     for (const group of topLevelGroups) {
-        const nodes = groupNodesMap.get(group) || [];
-        const { connected } = partitionNodes(nodes);
-        const withBridges = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
-        if (!(await runElkLayout(sortChainsByFlow(connected, flow, graph, withBridges), graph, withBridges, settings))) return;
-        foldChains(connected, [...Object.values(graph.links || {}), ...withBridges],
-            { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
-        // Connected members are already placed; this adds the grid of
-        // unconnected ones and stores the group-relative offsets.
-        groupSizes.set(group, layoutGroupContents(group, nodes, padding, () => {}));
+        const s = await layoutGroupTree(graph, group, resolved, { padding, hidden, flow }, engine);
+        if (!s) return;
+        groupSizes.set(group, s);
     }
 
     // ── Phase 2: Blocks in wrapped rows ────────────────────────────

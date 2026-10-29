@@ -1,12 +1,12 @@
 /**
  * Graph Arrange -- the wrapper every menu entry runs a layout through.
  *
- * `withPreservedCenter` unpins everything, runs the layout, fits nested
- * group frames to their members, shifts the result back to the old centre
- * and re-places the subgraph IO nodes. No layout calls anything in here.
+ * `withPreservedCenter` unpins everything, runs the layout, shifts the
+ * result back to the old centre and re-places the subgraph IO nodes. No
+ * layout calls anything in here.
  */
 
-import { TITLE_HEIGHT, getSettings, sizeOf, positionSubgraphIO, getNodesBounds, isGroupInside, groupTitleHeight } from "./graphArrangeShared.js";
+import { TITLE_HEIGHT, sizeOf, positionSubgraphIO } from "./graphArrangeShared.js";
 
 /**
  * Compute the centroid (center of mass) of a set of nodes.
@@ -61,57 +61,9 @@ function unpinAll(graph) {
 }
 
 /**
- * Record every nested group (a group wholly inside another) before a layout.
- * Layouts only place top-level groups and flatten nested ones into them, so
- * the nested frames are fixed up afterwards by `restoreNestedGroups`.
- *
- * @param {Object} graph - Graph being arranged.
- * @returns {Array<Object>} { group, outer, outerPos, members } per nested group.
- */
-function captureNestedGroups(graph) {
-    const groups = graph._groups || [];
-    for (const group of groups) {
-        if (typeof group.recomputeInsideNodes === "function") group.recomputeInsideNodes();
-    }
-    const nested = [];
-    for (const group of groups) {
-        // Outermost group containing this one (same rule as resolveGroups).
-        let outer = null;
-        for (const other of groups) {
-            if (isGroupInside(group, other, groups) && (!outer || isGroupInside(outer, other, groups))) outer = other;
-        }
-        if (!outer) continue;
-        nested.push({ group, outer, outerPos: [outer.pos[0], outer.pos[1]], members: [...(group._nodes || [])] });
-    }
-    return nested;
-}
-
-/**
- * Fit nested group frames to their (re-arranged) member nodes; an empty
- * nested group moves along with its outermost group.
- *
- * @param {Array<Object>} nested - From `captureNestedGroups`.
- * @param {number} padding - Group padding setting (nested frames use half).
- * @returns {void}
- */
-function restoreNestedGroups(nested, padding) {
-    const pad = padding / 2;
-    for (const { group, outer, outerPos, members } of nested) {
-        if (members.length > 0) {
-            const b = getNodesBounds(members);
-            const titleH = groupTitleHeight(group);
-            group.pos = [b.minX - pad, b.minY - pad - titleH];
-            group.size = [b.maxX - b.minX + pad * 2, b.maxY - b.minY + pad * 2 + titleH];
-        } else {
-            group.pos = [group.pos[0] + outer.pos[0] - outerPos[0], group.pos[1] + outer.pos[1] - outerPos[1]];
-        }
-    }
-}
-
-/**
- * Run an arrange: unpin everything, lay out, fix nested group frames, then
- * shift everything back so the node centroid stays where it was (the
- * layouts build from the origin), and place the subgraph IO nodes.
+ * Run an arrange: unpin everything, lay out, then shift everything back so
+ * the node centroid stays where it was (the layouts build from the origin),
+ * and place the subgraph IO nodes.
  *
  * If the graph was empty before layout, no shift is applied (layout starts at origin).
  *
@@ -121,14 +73,12 @@ function restoreNestedGroups(nested, padding) {
  */
 export async function withPreservedCenter(graph, layoutFn) {
     unpinAll(graph);
-    const nested = captureNestedGroups(graph);
     const nodesBefore = graph._nodes || [];
     const hadNodes = nodesBefore.length > 0;
     const oldCenter = hadNodes ? computeCentroid(nodesBefore) : { x: 0, y: 0 };
 
     // Run the layout (may be async for ELK).
     await layoutFn();
-    restoreNestedGroups(nested, getSettings().groupPadding);
 
     // Every node and group has now been placed by the layout, so all of them
     // shift together.

@@ -1,31 +1,40 @@
 /**
  * Graph Arrange -- group handling shared by the group-aware layouts.
  *
- * Phase 1 lays out each group's members in group-relative coordinates
- * (`layoutGroupContents`), storing each node's offset in `_groupOffsetX/Y`;
- * other code reads those offsets (satellites, source alignment) until
- * `placeGroup` moves the group and deletes them. Also: group resolution,
+ * Phase 1 lays out each group's contents in group-relative coordinates
+ * (`layoutGroupTree`; nested groups are rigid blocks, laid out first),
+ * storing each node's and nested group's offset in `_groupOffsetX/Y`; other
+ * code reads those offsets (satellites, source alignment) until `placeGroup`
+ * moves the group and deletes them. Also: group resolution and nesting,
  * top-level block edges and satellites.
  */
 
 import { TITLE_HEIGHT, sizeOf, partitionNodes, layoutDisconnectedNodes, getGraphBottom, getNodesBounds, isGroupInside, groupTitleHeight } from "./graphArrangeShared.js";
-import { rankBlocks } from "./graphArrangeFlow.js";
+import { rankBlocks, collectBridgeLinks } from "./graphArrangeFlow.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Group Resolution (shared by all group-aware layouts)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Resolve group membership for all nodes in the graph.
+ * Resolve group membership and nesting for all nodes in the graph.
  *
  * Handles:
  * - Refreshing group node membership via recomputeInsideNodes().
- * - Flattening nested groups into their outermost parent.
- * - Mapping each node to its top-level group.
+ * - The nesting tree: each group's parent is the innermost group wholly
+ *   containing it (`isGroupInside`); groups with none are top-level.
+ * - Mapping each node to its top-level group (`nodeToGroup`, all nodes of a
+ *   top-level group incl. nested ones in `groupNodesMap`) and to its
+ *   innermost group (`directMembers`).
  * - Identifying ungrouped nodes.
  *
  * @param {Object} graph - The LiteGraph graph instance.
- * @returns {Object} { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes }
+ * @returns {{ topLevelGroups: Array<Object>, groupNodesMap: Map<Object, Array<Object>>,
+ *   nodeToGroup: Map<*, Object>, ungroupedNodes: Array<Object>, parentOf: Map<Object, Object|null>,
+ *   childGroups: Map<Object, Array<Object>>, directMembers: Map<Object, Array<Object>>,
+ *   allMembers: Map<Object, Array<Object>> }} `childGroups` = directly nested
+ *   groups; `directMembers` = nodes whose innermost group it is; `allMembers` =
+ *   every node inside it, nested groups included. All three for every group.
  */
 export function resolveGroups(graph) {
     const allNodes = graph._nodes || [];
@@ -38,25 +47,28 @@ export function resolveGroups(graph) {
         }
     }
 
-    // Detect nested groups (g1 fully inside g2).
-    const isNested = new Set();
-    for (const g1 of groups) {
-        for (const g2 of groups) {
-            if (isGroupInside(g1, g2, groups)) isNested.add(g1);
-        }
+    // Nesting: every group containing a group; the innermost one (the one
+    // inside the most others) is its parent.
+    const containers = new Map(groups.map((g) => [g, groups.filter((o) => isGroupInside(g, o, groups))]));
+    const depth = (g) => containers.get(g).length;
+    const parentOf = new Map();
+    for (const g of groups) {
+        let parent = null;
+        for (const c of containers.get(g)) if (!parent || depth(c) > depth(parent)) parent = c;
+        parentOf.set(g, parent);
     }
+    const childGroups = new Map(groups.map((g) => [g, []]));
+    for (const g of groups) if (parentOf.get(g)) childGroups.get(parentOf.get(g)).push(g);
+    const rootOf = (g) => { while (parentOf.get(g)) g = parentOf.get(g); return g; };
 
-    const topLevelGroups = groups.filter((g) => !isNested.has(g));
+    const topLevelGroups = groups.filter((g) => !parentOf.get(g));
 
     // Map each node to its outermost group.
     const nodeToGroup = new Map();
     const groupNodesMap = new Map();
 
     const gatherNodes = (grp, targetGroup, nodesInGroup) => {
-        const members = grp._nodes || (grp._children
-            ? Array.from(grp._children).filter((c) => c.inputs !== undefined)
-            : []);
-        for (const node of members) {
+        for (const node of groupMembers(grp)) {
             if (!nodeToGroup.has(node.id)) {
                 nodeToGroup.set(node.id, targetGroup);
                 nodesInGroup.push(node);
@@ -69,52 +81,275 @@ export function resolveGroups(graph) {
         gatherNodes(group, group, nodesInGroup);
 
         // Also gather from nested groups inside this one.
-        for (const nested of isNested) {
-            if (isGroupInside(nested, group, groups)) gatherNodes(nested, group, nodesInGroup);
+        for (const nested of groups) {
+            if (nested !== group && rootOf(nested) === group) gatherNodes(nested, group, nodesInGroup);
         }
 
         groupNodesMap.set(group, nodesInGroup);
     }
 
+    // Innermost group of each grouped node (within its top-level group).
+    const innerOf = new Map();
+    for (const g of groups) {
+        for (const node of groupMembers(g)) {
+            if (nodeToGroup.get(node.id) !== rootOf(g)) continue;
+            const cur = innerOf.get(node.id);
+            if (!cur || depth(g) > depth(cur)) innerOf.set(node.id, g);
+        }
+    }
+    const directMembers = new Map(groups.map((g) => [g, []]));
+    const allMembers = new Map(groups.map((g) => [g, []]));
+    for (const nodes of groupNodesMap.values()) {
+        for (const node of nodes) {
+            const inner = innerOf.get(node.id);
+            if (!inner) continue;
+            directMembers.get(inner).push(node);
+            for (let g = inner; g; g = parentOf.get(g)) allMembers.get(g).push(node);
+        }
+    }
+
     const ungroupedNodes = allNodes.filter((n) => !nodeToGroup.has(n.id));
 
-    return { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes };
+    return { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes, parentOf, childGroups, directMembers, allMembers };
 }
 
 /**
- * Lay out one group's member nodes in group-relative coordinates (phase 1 of
- * the group-aware Quick and Smart layouts): connected members with
- * `layoutConnected`, unconnected members in a grid below them, then the whole
- * content shifted to start at (padding, padding + group title). Each node's
- * offset from the group origin is stored in `_groupOffsetX/Y`.
- * An empty group keeps its current size.
+ * Nodes inside a group (its own `_nodes`, else the node children).
+ *
+ * @param {Object} group - LiteGraph group (membership already recomputed).
+ * @returns {Array<Object>} Member nodes.
+ */
+function groupMembers(group) {
+    return group._nodes || (group._children
+        ? Array.from(group._children).filter((c) => c.inputs !== undefined)
+        : []);
+}
+
+/**
+ * Every group nested inside `group`, at any depth.
  *
  * @param {Object} group - The group.
- * @param {Array<Object>} nodes - Its member nodes.
- * @param {number} padding - Group padding setting.
- * @param {function(Array<Object>): void} layoutConnected - Lays out the connected members.
- * @returns {{ width: number, height: number }} Group size.
+ * @param {Map<Object, Array<Object>>} childGroups - From `resolveGroups`.
+ * @returns {Array<Object>} Descendant groups (not `group` itself).
  */
-export function layoutGroupContents(group, nodes, padding, layoutConnected) {
-    if (nodes.length === 0) return { width: group.size[0], height: group.size[1] };
-    const { connected, disconnected } = partitionNodes(nodes);
+export function descendantGroups(group, childGroups) {
+    const out = [];
+    const stack = [...(childGroups.get(group) || [])];
+    while (stack.length) {
+        const g = stack.pop();
+        out.push(g);
+        stack.push(...(childGroups.get(g) || []));
+    }
+    return out;
+}
+
+/**
+ * Innermost group containing a point (graph coordinates): of the groups the
+ * point lies in, the one no other of them sits inside.
+ *
+ * @param {Object} graph - Graph (its `_groups`).
+ * @param {number} x - X in graph units.
+ * @param {number} y - Y in graph units.
+ * @returns {Object|null} The group, or null when the point is in none.
+ */
+export function groupAtPoint(graph, x, y) {
+    const groups = graph?._groups || [];
+    const hits = groups.filter((g) => {
+        const [gx, gy, gw, gh] = g.boundingRect || g._bounding || [g.pos[0], g.pos[1], g.size[0], g.size[1]];
+        return x >= gx && x <= gx + gw && y >= gy && y <= gy + gh;
+    });
+    return hits.find((g) => !hits.some((o) => isGroupInside(o, g, groups))) || null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Group Contents (phase 1 of every group-aware layout)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Lays out the connected items of one group (nodes and nested-group blocks).
+ * `view.graph` is the graph, or (with nested groups) a stand-in whose links
+ * end at the blocks; `view.hidden` = hidden + bridge links in the same ids;
+ * `view.flow` = `computeFlowOrder` incl. the blocks. Returns false to abort
+ * the arrange (layout engine failed).
+ *
+ * @typedef {function(Array<Object>, {graph: Object, hidden: Array<Object>, flow: Map<string, Object>}):
+ *   (void|boolean|Promise<void|boolean>)} GroupEngine
+ */
+
+/**
+ * Stand-in node for a nested group in its parent's layout: a node without a
+ * body of its own, as big as the group frame (`pos` / `size` in node terms --
+ * title bar above `pos`). Slots are filled by `buildGroupView`, one per link
+ * crossing the group's frame, so `partitionNodes` and barycenters work.
+ *
+ * @param {Object} group - The nested group.
+ * @returns {Object} The block.
+ */
+function makeGroupBlock(group) {
+    const titleH = TITLE_HEIGHT();
+    return {
+        id: "group:" + group.id,
+        isGroupBlock: true,
+        group,
+        type: "",
+        flags: {},
+        pos: [group.pos[0], group.pos[1] + titleH],
+        size: [group.size[0], Math.max(0, group.size[1] - titleH)],
+        inputs: [],
+        outputs: [],
+        getTitle: () => group.title || "",
+    };
+}
+
+/**
+ * Links as seen from inside one group whose nested groups are blocks: every
+ * end inside a block is moved to the block (links within one block are
+ * dropped), hidden and bridge links likewise; the blocks get one slot per
+ * link crossing their frame and a flow position spanning their members.
+ * Without blocks it is the graph itself.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {Object} group - Group being laid out.
+ * @param {Array<Object>} items - Its direct member nodes and blocks.
+ * @param {Object} resolved - From `resolveGroups`.
+ * @param {{hidden: Array<Object>, flow: Map<string, Object>}} ctx - Hidden links and flow order of the graph.
+ * @returns {{graph: Object, hidden: Array<Object>, flow: Map<string, Object>}} View for a `GroupEngine`.
+ */
+function buildGroupView(graph, group, items, resolved, ctx) {
+    const extra = [...ctx.hidden, ...collectBridgeLinks(graph, resolved.allMembers.get(group) || [], ctx.hidden, resolved.nodeToGroup)];
+    const blocks = items.filter((it) => it.isGroupBlock);
+    if (blocks.length === 0) return { graph, hidden: extra, flow: ctx.flow };
+
+    const blockOf = new Map();
+    for (const b of blocks) for (const n of resolved.allMembers.get(b.group) || []) blockOf.set(String(n.id), b);
+    const mapId = (id) => blockOf.get(String(id))?.id ?? id;
+
+    const links = {};
+    for (const l of Object.values(graph.links || {})) {
+        if (!l) continue;
+        const a = blockOf.get(String(l.origin_id)), b = blockOf.get(String(l.target_id));
+        if (a && a === b) continue;
+        const v = { id: l.id, origin_id: l.origin_id, origin_slot: l.origin_slot, target_id: l.target_id, target_slot: l.target_slot };
+        if (a) { v.origin_id = a.id; v.origin_slot = a.outputs.length; a.outputs.push({ links: [l.id] }); }
+        if (b) { v.target_id = b.id; v.target_slot = b.inputs.length; b.inputs.push({ link: l.id }); }
+        links[l.id] = v;
+    }
+
+    const hidden = [];
+    const seen = new Set();
+    for (const l of extra) {
+        const o = mapId(l.origin_id), t = mapId(l.target_id);
+        const key = o + ">" + t;
+        if (String(o) === String(t) || seen.has(key)) continue;
+        seen.add(key);
+        hidden.push({ origin_id: o, target_id: t });
+    }
+
+    const flow = new Map(ctx.flow);
+    for (const b of blocks) {
+        let from = Infinity, to = 0;
+        for (const n of resolved.allMembers.get(b.group) || []) {
+            const f = ctx.flow.get(String(n.id));
+            if (f) { from = Math.min(from, f.from); to = Math.max(to, f.to); }
+        }
+        flow.set(b.id, { from: Number.isFinite(from) ? from : 0, to });
+    }
+
+    const byId = new Map(items.map((it) => [String(it.id), it]));
+    const view = {
+        links,
+        getNodeById: (id) => byId.get(String(id)) ?? graph.getNodeById?.(id) ?? null,
+        /** The graph's execution order with block members replaced by their block (first occurrence). */
+        computeExecutionOrder: (...args) => {
+            const out = [];
+            const done = new Set();
+            for (const n of graph.computeExecutionOrder?.(...args) || []) {
+                const it = blockOf.get(String(n.id)) || n;
+                if (!done.has(it)) { done.add(it); out.push(it); }
+            }
+            return out;
+        },
+    };
+    return { graph: view, hidden, flow };
+}
+
+/**
+ * Move every node and group inside `group`, and the group itself, by (dx, dy).
+ *
+ * @param {Object} group - The group.
+ * @param {Object} resolved - From `resolveGroups`.
+ * @param {number} dx - Shift in x.
+ * @param {number} dy - Shift in y.
+ * @returns {void}
+ */
+export function translateGroup(group, resolved, dx, dy) {
+    if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return;
+    for (const g of [group, ...descendantGroups(group, resolved.childGroups)]) g.pos = [g.pos[0] + dx, g.pos[1] + dy];
+    for (const n of resolved.allMembers.get(group) || []) n.pos = [n.pos[0] + dx, n.pos[1] + dy];
+}
+
+/**
+ * Lay out one group's contents in group-relative coordinates (phase 1 of the
+ * group-aware layouts): its own nodes plus each directly nested group as one
+ * rigid block (`makeGroupBlock`). Connected items go to `engine`, unconnected
+ * ones in a grid below them, then the whole content is shifted to start at
+ * (padding, padding + group title) and every node and nested group inside
+ * stores its offset from the group origin in `_groupOffsetX/Y` (`placeGroup`
+ * applies them). An empty group keeps its current size.
+ *
+ * With `recurse` (full arrange) nested groups are laid out first, bottom-up,
+ * so their blocks have their final size; without it (arranging one group)
+ * they keep their current size and contents.
+ *
+ * @param {Object} graph - Graph being arranged.
+ * @param {Object} group - The group.
+ * @param {Object} resolved - From `resolveGroups`.
+ * @param {{padding: number, hidden: Array<Object>, flow: Map<string, Object>}} ctx - Group padding,
+ *   `collectHiddenLinks` and `computeFlowOrder` of the graph.
+ * @param {GroupEngine} engine - Lays out the connected items.
+ * @param {{recurse?: boolean}} [options] - Lay out nested groups too (default true).
+ * @returns {Promise<{width: number, height: number, groups: Array<Object>}|null>} Group size and its
+ *   nested groups (for `placeGroup`), or null when the engine failed.
+ */
+export async function layoutGroupTree(graph, group, resolved, ctx, engine, { recurse = true } = {}) {
+    const children = resolved.childGroups.get(group) || [];
+    const nested = descendantGroups(group, resolved.childGroups);
+    if (recurse) {
+        for (const child of children) {
+            const s = await layoutGroupTree(graph, child, resolved, ctx, engine);
+            if (!s) return null;
+            placeGroup(child, resolved.allMembers.get(child) || [], 0, 0, s);
+        }
+    }
+    const blocks = children.map(makeGroupBlock);
+    const items = [...(resolved.directMembers.get(group) || []), ...blocks];
+    if (items.length === 0) return { width: group.size[0], height: group.size[1], groups: nested };
+
+    const view = buildGroupView(graph, group, items, resolved, ctx);
+    const { connected, disconnected } = partitionNodes(items);
     if (connected.length > 0) {
-        layoutConnected(connected);
+        if ((await engine(connected, view)) === false) return null;
         if (disconnected.length > 0) {
             layoutDisconnectedNodes(disconnected, getGraphBottom(connected), getNodesBounds(connected).minX);
         }
     } else {
         layoutDisconnectedNodes(disconnected, 0, 0);
     }
-    const bounds = getNodesBounds(nodes);
-    const shiftX = padding - bounds.minX;
-    const shiftY = padding + groupTitleHeight(group) - bounds.minY;
-    for (const node of nodes) {
-        node.pos = [node.pos[0] + shiftX, node.pos[1] + shiftY];
-        node._groupOffsetX = node.pos[0];
-        node._groupOffsetY = node.pos[1];
+    const bounds = getNodesBounds(items);
+    const shiftX = ctx.padding - bounds.minX;
+    const shiftY = ctx.padding + groupTitleHeight(group) - bounds.minY;
+    const titleH = TITLE_HEIGHT();
+    for (const it of items) {
+        it.pos = [it.pos[0] + shiftX, it.pos[1] + shiftY];
+        if (it.isGroupBlock) {
+            translateGroup(it.group, resolved, it.pos[0] - it.group.pos[0], it.pos[1] - titleH - it.group.pos[1]);
+        }
     }
-    return computeGroupSize(group, nodes, padding);
+    for (const it of [...(resolved.allMembers.get(group) || []), ...nested]) {
+        it._groupOffsetX = it.pos[0];
+        it._groupOffsetY = it.pos[1];
+    }
+    return { ...computeGroupSize(group, items, ctx.padding), groups: nested };
 }
 
 /**
@@ -132,24 +367,25 @@ export function getLayoutBottom(nodes, groups) {
 }
 
 /**
- * Move a group to `pos` with size `size` and place its members at their
- * stored `_groupOffsetX/Y` offsets.
+ * Move a group to `pos` with size `size` and place its members and nested
+ * groups at their stored `_groupOffsetX/Y` offsets.
  *
  * @param {Object} group - The group.
- * @param {Array<Object>} nodes - Its member nodes.
+ * @param {Array<Object>} nodes - Its member nodes (nested ones included).
  * @param {number} x - New group x.
  * @param {number} y - New group y.
- * @param {{ width: number, height: number }} size - New group size.
+ * @param {{ width: number, height: number, groups?: Array<Object> }} size - New group size
+ *   and its nested groups (from `layoutGroupTree`).
  * @returns {void}
  */
 export function placeGroup(group, nodes, x, y, size) {
     group.pos = [x, y];
     group.size = [size.width, size.height];
-    for (const node of nodes) {
-        if (node._groupOffsetX == null) continue;
-        node.pos = [x + node._groupOffsetX, y + node._groupOffsetY];
-        delete node._groupOffsetX;
-        delete node._groupOffsetY;
+    for (const item of [...nodes, ...(size.groups || [])]) {
+        if (item._groupOffsetX == null) continue;
+        item.pos = [x + item._groupOffsetX, y + item._groupOffsetY];
+        delete item._groupOffsetX;
+        delete item._groupOffsetY;
     }
 }
 

@@ -6,8 +6,8 @@
  */
 
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, hasNoDrawnInput, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
-import { collectHiddenLinks, collectBridgeLinks, computeFlowOrder, sortChainsByFlow } from "./graphArrangeFlow.js";
-import { resolveGroups, layoutGroupContents, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
+import { collectHiddenLinks, computeFlowOrder, sortChainsByFlow } from "./graphArrangeFlow.js";
+import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
 import { foldChains } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -197,17 +197,32 @@ export function arrangeDagre(graph, options) {
 }
 
 /**
+ * Smart's layout of one group's connected items (see `layoutGroupTree`).
+ *
+ * @param {Object} settings - Layout settings (`getSettings`).
+ * @returns {import("./graphArrangeGroups.js").GroupEngine}
+ */
+export function smartGroupEngine(settings) {
+    return (items, view) => {
+        runDagreLayout(sortChainsByFlow(items, view.flow, view.graph, view.hidden), view.graph.links, settings, view.hidden);
+        foldChains(items, [...Object.values(view.graph.links || {}), ...view.hidden],
+            { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
+    };
+}
+
+/**
  * Arrange nodes using dagre respecting group boundaries.
  *
- * Phase 1: Dagre layout within each group.
+ * Phase 1: Dagre layout within each group (nested groups first, then as
+ *          blocks in their parent).
  * Phase 2: Dagre layout of groups as mega-nodes + ungrouped nodes.
  * Phase 3: Disconnected nodes below.
  *
  * @param {Object} graph - Graph being arranged.
  * @param {{ rankdir?: string }} [options] - `rankdir` "LR" / "TB" overrides the setting.
- * @returns {void}
+ * @returns {Promise<void>}
  */
-export function arrangeDagreGroups(graph, options) {
+export async function arrangeDagreGroups(graph, options) {
     if (!window.dagre) { console.error("[EnhancementUtils] dagre not loaded."); return; }
     const allNodes = graph._nodes || [];
     if (allNodes.length === 0) return;
@@ -217,7 +232,8 @@ export function arrangeDagreGroups(graph, options) {
     const titleH = TITLE_HEIGHT();
     const padding = settings.groupPadding;
 
-    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolveGroups(graph);
+    const resolved = resolveGroups(graph);
+    const { topLevelGroups, groupNodesMap, nodeToGroup, ungroupedNodes } = resolved;
     const { connected: ungroupedConnected, disconnected } = partitionNodes(ungroupedNodes);
     const hidden = collectHiddenLinks(graph);
 
@@ -226,15 +242,9 @@ export function arrangeDagreGroups(graph, options) {
     const groupSizes = new Map();
 
     const flow = computeFlowOrder(graph, hidden);
+    const engine = smartGroupEngine(settings);
     for (const group of topLevelGroups) {
-        const nodes = groupNodesMap.get(group) || [];
-        groupSizes.set(group, layoutGroupContents(group, nodes, padding,
-            (gc) => {
-                const links = [...hidden, ...collectBridgeLinks(graph, nodes, hidden, nodeToGroup)];
-                runDagreLayout(sortChainsByFlow(gc, flow, graph, links), graph.links, settings, links);
-                foldChains(gc, [...Object.values(graph.links || {}), ...links],
-                    { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
-            }));
+        groupSizes.set(group, await layoutGroupTree(graph, group, resolved, { padding, hidden, flow }, engine));
     }
 
     // ── Phase 2: Top-level dagre layout ────────────────────────────

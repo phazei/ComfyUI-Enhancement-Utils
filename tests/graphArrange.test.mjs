@@ -25,7 +25,7 @@ vm.runInThisContext(fs.readFileSync(path.join(root, "js/lib/elk.bundled.min.js")
 
 const {
     withPreservedCenter, arrangeFloatRightGroups, arrangeDagreGroups, arrangeDagre, arrangeELK, setSettingsSource, collectBridgeLinks, computeFlowOrder,
-    collectHiddenLinks, placeWrappedLayers, breakLines, findChains, FOLD_RATIO,
+    collectHiddenLinks, placeWrappedLayers, breakLines, findChains, FOLD_RATIO, arrangeGroup, groupAtPoint, pushAlong,
 } = await import("../js/graphArrangeLayout.js");
 setSettingsSource(() => ({}));
 
@@ -1257,6 +1257,249 @@ for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced 
     const ue = buildUseEverywhereGraph();
     const uePairs = collectHiddenLinks(ue.graph).map((l) => `${l.origin_id}>${l.target_id}`);
     check("Use Everywhere: broadcaster -> receiver", JSON.stringify(uePairs) === JSON.stringify(["2>3"]), JSON.stringify(uePairs));
+}
+
+// ── Nested groups ──────────────────────────────────────────────────────────
+
+/** Rects (title-inclusive) of a list of nodes / groups that overlap each other. */
+function rectOverlaps(items) {
+    const bad = [];
+    for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+            const a = rectOf(items[i][1]), b = rectOf(items[j][1]);
+            if (a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5) {
+                bad.push(`${items[i][0]}/${items[j][0]}`);
+            }
+        }
+    }
+    return bad;
+}
+
+/** Frame around nodes and groups (groups via their bounds). */
+const frameAroundItems = (items, pad, titlePad) =>
+    frameAround(items.map((it) => (it instanceof MockGroup ? { boundingRect: it._bounding } : it)), pad, titlePad);
+
+/**
+ * Three levels: Outer holds a -> [Inner] -> b and an empty nested group;
+ * Inner holds c1 -> c2 -> c3 and Deep (d1 -> d2, fed by c2). An ungrouped
+ * source feeds a. Scattered so a flattening layout would mix them.
+ */
+function buildNestedGraph() {
+    const graph = new MockGraph();
+    const n = (id, x, y) => graph.add(new MockNode(id, "N", x, y, 200, 100, 1, 1));
+    const src = n(1, -3000, 0);
+    const a = n(2, 0, 0), b = n(3, 3600, 0);
+    const c = [n(4, 1500, 1500), n(5, 1900, 1400), n(6, 1500, 1800)];
+    const d = [n(7, 2000, 2200), n(8, 2300, 2400)];
+    graph.connect(src, 0, a, 0);
+    graph.connect(a, 0, c[0], 0);
+    graph.connect(c[0], 0, c[1], 0);
+    graph.connect(c[1], 0, c[2], 0);
+    graph.connect(c[2], 0, b, 0);
+    graph.connect(c[1], 0, d[0], 0);
+    graph.connect(d[0], 0, d[1], 0);
+    const Deep = new MockGroup(3, "Deep", ...frameAround(d, 20, 34));
+    const Inner = new MockGroup(2, "Inner", ...frameAroundItems([...c, Deep], 20, 34));
+    const Empty = new MockGroup(4, "EmptyInner", 400, 3000, 300, 200);
+    const Outer = new MockGroup(1, "Outer", ...frameAroundItems([a, b, Inner, Empty], 30, 34));
+    // Listed outermost last on purpose: nesting must not depend on list order.
+    for (const g of [Deep, Inner, Empty, Outer]) graph.add(g);
+    for (const g of graph._groups) g.recomputeInsideNodes();
+    return { graph, src, a, b, c, d, Outer, Inner, Deep, Empty };
+}
+
+{
+    console.log("Nested groups");
+    const { graph, Outer, Inner, Deep, Empty } = buildNestedGraph();
+    const mid = (g) => [g.pos[0] + 5, g.pos[1] + 40];
+    check("groupAtPoint: innermost group", groupAtPoint(graph, ...mid(Deep)) === Deep);
+    check("groupAtPoint: inside Inner, outside Deep", groupAtPoint(graph, Inner.pos[0] + 2, Inner.pos[1] + 2) === Inner);
+    check("groupAtPoint: outside every group", groupAtPoint(graph, -5000, -5000) === null);
+    check("groupAtPoint: outer area", groupAtPoint(graph, Outer.pos[0] + 2, Outer.pos[1] + 2) === Outer);
+}
+
+for (const [name, layout] of LAYOUTS) {
+    for (const dir of name.startsWith("Quick") ? ["LR"] : ["LR", "TB"]) {
+        setSettingsSource(() => ({ rankdir: dir }));
+        console.log(`${name} ${dir} nested groups`);
+        const { graph, a, b, c, d, Outer, Inner, Deep, Empty } = buildNestedGraph();
+        await arrange(graph, layout);
+        check("nested groups stay inside their parents",
+            groupInside(Inner, Outer) && groupInside(Deep, Inner) && groupInside(Empty, Outer));
+        check("empty nested group keeps its size", Empty.size[0] === 300 && Empty.size[1] === 200, JSON.stringify(Empty.size));
+        check("nodes stay in their innermost group only",
+            [a, b].every((n) => centreIn(n, Outer) && !centreIn(n, Inner) && !centreIn(n, Empty))
+            && c.every((n) => centreIn(n, Inner) && !centreIn(n, Deep)) && d.every((n) => centreIn(n, Deep)));
+        const levels = {
+            Outer: [["a", a], ["b", b], ["Inner", Inner], ["Empty", Empty]],
+            Inner: [...c.map((n) => ["c" + n.id, n]), ["Deep", Deep]],
+            Deep: d.map((n) => ["d" + n.id, n]),
+        };
+        for (const [lvl, items] of Object.entries(levels)) {
+            const ov = rectOverlaps(items);
+            check(`no overlaps inside ${lvl}`, ov.length === 0, ov.join(", "));
+        }
+        const k = dir === "LR" ? 0 : 1;
+        const ra = rectOf(a), ri = rectOf(Inner), rb = rectOf(b);
+        check("nested group sits in the flow: a, Inner, b",
+            ra[k] + ra[k + 2] <= ri[k] + 0.5 && ri[k] + ri[k + 2] <= rb[k] + 0.5, `a ${ra}, Inner ${ri}, b ${rb}`);
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check("second run moves nothing", m.length === 0, m.join(", "));
+    }
+}
+setSettingsSource(() => ({}));
+
+// ── Arrange one group ──────────────────────────────────────────────────────
+
+{
+    console.log("pushAlong");
+    const unit = (x, y, w, h) => ({ rect: [x, y, w, h], move(dx, dy) { this.moved = [dx, dy]; } });
+    const A = unit(150, 0, 100, 50), B = unit(260, 40, 100, 100), C = unit(150, 200, 100, 100), D = unit(400, 120, 100, 50);
+    pushAlong([D, C, B, A], { orig: [0, 0, 100, 100], cur: [0, 0, 300, 100] }, 0, 50);
+    check("in the way: pushed to the frame end + the old gap (≤ 50)", A.rect[0] === 350, A.rect.join(","));
+    check("staggered: pushed by what was pushed, keeping its smaller gap", B.rect[0] === 460, B.rect.join(","));
+    check("cascade continues past the frame's band", D.rect[0] === 600, D.rect.join(","));
+    check("not in the way: stays", C.rect[0] === 150 && !C.moved, C.rect.join(","));
+    const E = unit(1000, 0, 100, 100);
+    pushAlong([E], { orig: [0, 0, 100, 100], cur: [0, 0, 300, 100] }, 0, 50);
+    check("enough free space: nothing moves", !E.moved);
+}
+
+/**
+ * Group T (frame 400x300 at 0,0) holding a chain of 4 nodes stacked on each
+ * other, everything pinned. Around it: R right of T (in its band), R2 right
+ * of R (close), F above-right, L left, Bt below. Subgraph IO.
+ */
+function buildSingleGroupGraph({ rx = 600 } = {}) {
+    const graph = new MockGraph({ subgraph: true });
+    const n = (id, x, y) => graph.add(new MockNode(id, "N", x, y, 200, 100, 1, 1));
+    const t = [0, 1, 2, 3].map((i) => n(i + 1, 40 + i * 10, 80 + i * 10));
+    for (let i = 1; i < t.length; i++) graph.connect(t[i - 1], 0, t[i], 0);
+    const T = graph.add(new MockGroup(1, "T", 0, 0, 400, 300));
+    const g = (id, title, node) => graph.add(new MockGroup(id, title, ...frameAround([node], 30, 34)));
+    const r = n(11, rx, 100);
+    const r2 = n(12, rx + 300, 150);
+    const f = n(13, 600, -800);
+    const l = n(14, -700, 100);
+    const bt = n(15, 50, 700);
+    const groups = { T, R: g(2, "R", r), R2: g(3, "R2", r2), F: g(4, "F", f), L: g(5, "L", l), Bt: g(6, "Bt", bt) };
+    for (const gr of graph._groups) gr.recomputeInsideNodes();
+    for (const item of [...graph._nodes, ...graph._groups]) item.pin(true);
+    return { graph, t, groups };
+}
+
+{
+    const cases = [
+        ["Quick", "quick", "LR"], ["Smart LR", "smart", "LR"], ["Smart TB", "smart", "TB"],
+        ["Advanced LR", "advanced", "LR"], ["Advanced TB", "advanced", "TB"],
+    ];
+    for (const [name, kind, dir] of cases) {
+        console.log(`Arrange (Group) ${name}`);
+        const { graph, t, groups } = buildSingleGroupGraph();
+        const { T, R, R2, F, L, Bt } = groups;
+        const before = snapshot(graph);
+        await arrangeGroup(graph, T, kind, { rankdir: dir });
+        const after = snapshot(graph);
+        check("group keeps its top-left corner", T.pos[0] === 0 && T.pos[1] === 0, T.pos.join(","));
+        check("group members stay inside", t.every((n) => centreIn(n, T)));
+        check("group members are unpinned", t.every((n) => !n.flags.pinned));
+        check("pushed and other items keep their pin", [R, R2, F, L, Bt, ...graph._nodes.filter((n) => !t.includes(n))].every((x) => x.flags.pinned));
+        const ov = overlaps(graph);
+        check("no overlaps", ov.length === 0, ov.join(", "));
+        const same = (key) => !moved({ [key]: before[key] }, { [key]: after[key] }).length;
+        check("items not in the way stay put", same("group F") && same("group L") && same("input") && same("node 13") && same("node 14"),
+            moved(before, after).join(", "));
+        if (dir === "LR") {
+            check("wider: the group to its right moves right, same height",
+                R.pos[0] > before["group R"][0] && R.pos[1] === before["group R"][1], R.pos.join(","));
+            check("the one behind it is pushed along", R2.pos[0] > before["group R2"][0]);
+            check("gap kept between the pushed groups", R2.pos[0] - (R.pos[0] + R.size[0]) >= 40 - 0.5,
+                `${R2.pos[0] - (R.pos[0] + R.size[0])}`);
+        } else {
+            check("taller: the group below moves down, same x",
+                Bt.pos[1] > before["group Bt"][1] && Bt.pos[0] === before["group Bt"][0], Bt.pos.join(","));
+            check("narrower: nothing moves sideways", same("group R") && same("group R2"));
+        }
+        const s = snapshot(graph);
+        await arrangeGroup(graph, T, kind, { rankdir: dir });
+        const m = moved(s, snapshot(graph));
+        check("second run moves nothing", m.length === 0, m.join(", "));
+    }
+
+    console.log("Arrange (Group) free space");
+    {
+        const { graph, groups } = buildSingleGroupGraph({ rx: 2500 });
+        const before = snapshot(graph);
+        await arrangeGroup(graph, groups.T, "quick");
+        const m = moved(before, snapshot(graph)).filter((k) => !/^node [1-4]$|^group T$/.test(k));
+        check("room made beforehand: nothing else moves", m.length === 0, m.join(", "));
+    }
+}
+
+/**
+ * Outer holds Inner (3 nodes stacked, 400x300 at 0,0) and a node s right of
+ * it; top-level group X right of Outer.
+ */
+function buildNestedTargetGraph() {
+    const graph = new MockGraph();
+    const n = (id, x, y) => graph.add(new MockNode(id, "N", x, y, 200, 100, 1, 1));
+    const inner = [0, 1, 2].map((i) => n(i + 1, 40 + i * 10, 80 + i * 10));
+    for (let i = 1; i < inner.length; i++) graph.connect(inner[i - 1], 0, inner[i], 0);
+    const s = n(21, 500, 100);
+    const x = n(31, 950, 100);
+    const Inner = new MockGroup(2, "Inner", 0, 0, 400, 300);
+    const Outer = new MockGroup(1, "Outer", -50, -60, 900, 420);
+    const X = new MockGroup(3, "X", ...frameAround([x], 30, 34));
+    for (const g of [Inner, Outer, X]) graph.add(g);
+    for (const g of graph._groups) g.recomputeInsideNodes();
+    return { graph, inner, s, x, Inner, Outer, X };
+}
+
+{
+    console.log("Arrange (Group) nested target");
+    const { graph, inner, s, Inner, Outer, X } = buildNestedTargetGraph();
+    const xBefore = X.pos[0], outerW = Outer.size[0];
+    await arrangeGroup(graph, Inner, "quick");
+    check("inner group keeps its corner", Inner.pos[0] === 0 && Inner.pos[1] === 0, Inner.pos.join(","));
+    check("outer group keeps its corner and grows", Outer.pos[0] === -50 && Outer.pos[1] === -60 && Outer.size[0] > outerW,
+        `${Outer.pos} ${Outer.size}`);
+    check("inner group stays inside the outer one", groupInside(Inner, Outer));
+    check("sibling pushed but stays in the outer group, out of the inner one", centreIn(s, Outer) && !centreIn(s, Inner));
+    check("inner members stay inside", inner.every((n) => centreIn(n, Inner)));
+    const ovIn = rectOverlaps([["Inner", Inner], ["s", s]]);
+    check("no overlaps inside the outer group", ovIn.length === 0, ovIn.join(", "));
+    const ov = rectOverlaps([["Outer", Outer], ["X", X]]);
+    check("no overlaps at the top", ov.length === 0, ov.join(", "));
+    check("group beside the outer group is pushed", X.pos[0] > xBefore);
+    const snap = snapshot(graph);
+    await arrangeGroup(graph, Inner, "quick");
+    const m = moved(snap, snapshot(graph));
+    check("second run moves nothing", m.length === 0, m.join(", "));
+}
+
+{
+    console.log("Arrange (Group) with a nested group");
+    for (const kind of ["quick", "smart", "advanced"]) {
+        const { graph, inner, s, Inner, Outer } = buildNestedTargetGraph();
+        graph.connect(s, 0, inner[0], 0);
+        // Arrange Inner first so it has a real layout, then remember it.
+        await arrangeGroup(graph, Inner, kind);
+        const rel = inner.map((n) => [n.pos[0] - Inner.pos[0], n.pos[1] - Inner.pos[1]]);
+        const size = [...Inner.size];
+        await arrangeGroup(graph, Outer, kind);
+        check(`${kind}: nested group keeps its contents and size`,
+            inner.every((n, i) => n.pos[0] - Inner.pos[0] === rel[i][0] && n.pos[1] - Inner.pos[1] === rel[i][1])
+            && Inner.size[0] === size[0] && Inner.size[1] === size[1]);
+        check(`${kind}: nested group stays inside`, groupInside(Inner, Outer));
+        const rs = rectOf(s), ri = rectOf(Inner);
+        check(`${kind}: feeder before the nested group`, rs[0] + rs[2] <= ri[0] + 0.5, `s ${rs}, Inner ${ri}`);
+        const snap = snapshot(graph);
+        await arrangeGroup(graph, Outer, kind);
+        const m = moved(snap, snapshot(graph));
+        check(`${kind}: second run moves nothing`, m.length === 0, m.join(", "));
+    }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
