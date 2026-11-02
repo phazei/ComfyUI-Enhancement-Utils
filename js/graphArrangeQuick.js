@@ -5,7 +5,7 @@
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
 import { collectHiddenLinks, computeFlowOrder, chainRanks, rankBlocks } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
-import { foldChains, packComponents, wrapOptions } from "./graphArrangeFold.js";
+import { finishGroupLayout, wrapOptions } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Float Right Algorithm
@@ -153,9 +153,7 @@ export function quickGroupEngine(settings) {
     const opts = { horizontal: true, along: MARGIN, across: MARGIN, wrap: wrapOptions(settings) };
     return (items, view) => {
         floatRightLayout(items, view.graph, new Set(items.map((n) => n.id)), view.hidden, view.flow);
-        const links = [...Object.values(view.graph.links || {}), ...view.hidden];
-        foldChains(items, links, opts);
-        packComponents(items, links, opts);
+        return finishGroupLayout(items, [...Object.values(view.graph.links || {}), ...view.hidden], opts);
     };
 }
 

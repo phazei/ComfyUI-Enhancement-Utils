@@ -25,7 +25,7 @@ vm.runInThisContext(fs.readFileSync(path.join(root, "js/lib/elk.bundled.min.js")
 
 const {
     withPreservedCenter, arrangeFloatRightGroups, arrangeDagreGroups, arrangeDagre, arrangeELK, setSettingsSource, collectBridgeLinks, computeFlowOrder,
-    collectHiddenLinks, placeWrappedLayers, breakLines, findChains, FOLD_RATIO, arrangeGroup, groupAtPoint, pushAlong,
+    collectHiddenLinks, placeWrappedLayers, breakLines, findRuns, FOLD_RATIO, arrangeGroup, groupAtPoint, pushAlong,
 } = await import("../js/graphArrangeLayout.js");
 setSettingsSource(() => ({}));
 
@@ -334,10 +334,11 @@ const rectOf = (it) => (it instanceof MockNode ? it.boundingRect : it._bounding)
  * runs with the flow (text wrap, no alternating direction).
  *
  * @param {Array<[string, Object]>} chain - [label, node or group] in flow order.
- * @param {{wrap?: boolean, tb?: boolean}} [opts]
+ * @param {{wrap?: boolean, tb?: boolean, stack?: boolean}} [opts] - `stack`: the
+ *   next item may share the previous one's column (start no earlier than it).
  * @returns {Array<string>} Offending "a -> b" pairs.
  */
-function flowErrors(chain, { wrap = false, tb = false } = {}) {
+function flowErrors(chain, { wrap = false, tb = false, stack = false } = {}) {
     const m0 = (r) => (tb ? r[1] : r[0]), m1 = (r) => (tb ? r[1] + r[3] : r[0] + r[2]);
     const c0 = (r) => (tb ? r[0] : r[1]), c1 = (r) => (tb ? r[0] + r[2] : r[1] + r[3]);
     const rects = chain.map(([, it]) => rectOf(it));
@@ -355,7 +356,7 @@ function flowErrors(chain, { wrap = false, tb = false } = {}) {
     const bad = [];
     for (let i = 1; i < chain.length; i++) {
         const a = rects[i - 1], b = rects[i], ra = rowIdx(i - 1), rb = rowIdx(i);
-        const ok = rb !== ra ? rb > ra : m0(b) >= m1(a) - 0.5;
+        const ok = rb !== ra ? rb > ra : m0(b) >= (stack ? m0(a) : m1(a)) - 0.5;
         if (!ok) bad.push(`${chain[i - 1][0]} -> ${chain[i][0]}`);
     }
     return bad;
@@ -1170,14 +1171,23 @@ for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced 
             JSON.stringify(lines));
         const tight = breakLines(items, 100, 50, 80);
         check("breakLines: nothing fits together -> one item per line", tight.length === 5, JSON.stringify(tight));
-        const n = (id) => new MockNode(id, "N", 0, 0);
-        const ns = [1, 2, 3, 4, 5].map(n);
-        const l = (a, b) => ({ origin_id: ns[a].id, target_id: ns[b].id });
+        // Laid out left to right, one node per step (x = 0, 300, 600...).
+        const ns = [1, 2, 3, 4, 5].map((id, i) => new MockNode(id, "N", i * 300, 0));
+        const l = (a, b) => ({ origin_id: a.id, target_id: b.id });
+        const path = [l(ns[2], ns[3]), l(ns[0], ns[1]), l(ns[1], ns[2]), l(ns[3], ns[4])];
         const ids = (cs) => JSON.stringify(cs.map((c) => c.map((x) => x.id)));
-        check("findChains: a path in flow order", ids(findChains(ns.slice(0, 4), [l(2, 3), l(0, 1), l(1, 2), l(1, 2)])) === '[["1","2","3","4"]]');
-        check("findChains: a branch is not a chain", findChains(ns, [l(0, 1), l(1, 2), l(2, 3), l(1, 4)]).length === 0);
-        check("findChains: a loop is not a chain", findChains(ns.slice(0, 3), [l(0, 1), l(1, 2), l(2, 0)]).length === 0);
-        check("findChains: two nodes are too short", findChains(ns.slice(0, 2), [l(0, 1)]).length === 0);
+        check("findRuns: a path in flow order", ids(findRuns(ns, path, true)) === '[["1","2","3","4","5"]]', ids(findRuns(ns, path, true)));
+        const display = new MockNode(20, "Display", 300, 300);
+        check("findRuns: a node sharing a step breaks the run there",
+            ids(findRuns([...ns, display], [...path, l(ns[0], display)], true)) === '[["3","4","5"]]',
+            ids(findRuns([...ns, display], [...path, l(ns[0], display)], true)));
+        const concat = new MockNode(21, "Concat", 1500, 0);
+        check("findRuns: a concat fed by every node keeps the run",
+            ids(findRuns([...ns, concat], [...path, ...ns.map((x) => l(x, concat))], true)) === '[["1","2","3","4","5","21"]]');
+        check("findRuns: steps not linked to each other are no run", findRuns(ns, [l(ns[0], ns[2]), l(ns[1], ns[3])], true).length === 0);
+        check("findRuns: two nodes are too short", findRuns(ns.slice(0, 2), [l(ns[0], ns[1])], true).length === 0);
+        const tb = [1, 2, 3].map((id, i) => new MockNode(id, "N", 0, i * 300));
+        check("findRuns: top to bottom", ids(findRuns(tb, [l(tb[0], tb[1]), l(tb[1], tb[2])], false)) === '[["1","2","3"]]');
     }
 
     /** LoRA-loader style group: Get -> 7 tall loaders -> Set, feeding a second group. */
@@ -1226,7 +1236,8 @@ for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced 
             check(`${name}: short neighbours share columns`, cols < chain.length, `${cols} columns`);
         } else {
             check(`${name}: tall chain folds to at most 1:${FOLD_RATIO}`, h / w <= FOLD_RATIO, `${w}x${h}`);
-            const bad = flowErrors(chain.map((n) => ["#" + n.id, n]), { wrap: true });
+            // Laid out left to right and wrapped: short neighbours may share a column.
+            const bad = flowErrors(chain.map((n) => ["#" + n.id, n]), { wrap: true, stack: true });
             check(`${name}: folded chain reads in rows, left to right`, bad.length === 0, bad.join(", "));
         }
         const ov = nodeOverlaps(chain);
@@ -1324,6 +1335,88 @@ setSettingsSource(() => ({}));
         tb.G.size[0] > tb.G.size[1] && tb.G.size[0] / tb.G.size[1] <= FOLD_RATIO, `${tb.G.size}`);
     setSettingsSource(() => ({}));
 }
+
+// ── Wrapping along the flow ────────────────────────────────────────────────
+
+/**
+ * A LoRA-style chain of 7 loaders in a group, plus (`extra`) a Display node
+ * hanging off one loader, or a concat node fed by every loader feeding a
+ * Set -- neither is a plain chain any more. The chain feeds a node in
+ * another group.
+ */
+function buildLongFlowGraph(extra, heights = [700, 500, 450, 600, 400, 520, 480]) {
+    const graph = new MockGraph();
+    const chain = heights.map((h, i) => graph.add(new MockNode(i + 1, "Loader", i * 100, i * 50, 500, h, 2, 3)));
+    for (let i = 1; i < chain.length; i++) graph.connect(chain[i - 1], 0, chain[i], 0);
+    const members = [...chain];
+    if (extra === "display") {
+        const d = graph.add(new MockNode(20, "Display", 50, 50, 300, 200, 1, 0));
+        graph.connect(chain[0], 2, d, 0);
+        members.push(d);
+    }
+    if (extra === "concat") {
+        const c = graph.add(new MockNode(21, "Concat", 60, 60, 300, 300, chain.length, 1));
+        chain.forEach((n, i) => graph.connect(n, 2, c, i));
+        const s = graph.add(new MockNode(22, "Set", 70, 70, 200, 60, 1, 0));
+        graph.connect(c, 0, s, 0);
+        members.push(c, s);
+    }
+    const after = graph.add(new MockNode(30, "Sampler", 0, 6000, 300, 200, 1, 0));
+    graph.connect(chain[chain.length - 1], 1, after, 0);
+    const G = graph.add(new MockGroup(1, "Loras", ...frameAround(members, 30, 34)));
+    graph.add(new MockGroup(2, "Gen", ...frameAround([after], 30, 34)));
+    for (const g of graph._groups) g.recomputeInsideNodes();
+    return { graph, chain, members, G };
+}
+
+for (const [name, layout] of LAYOUTS) {
+    for (const dir of name.startsWith("Quick") ? ["LR"] : ["LR", "TB"]) {
+        for (const extra of ["", "display", "concat"]) {
+            setSettingsSource(() => ({ rankdir: dir }));
+            console.log(`${name} ${dir} wrap along the flow${extra ? " (" + extra + ")" : ""}`);
+            const { graph, chain, members, G } = buildLongFlowGraph(extra);
+            await arrange(graph, layout);
+            const [w, h] = G.size;
+            check("not more than the trigger times longer than wide", Math.max(w, h) / Math.min(w, h) <= FOLD_RATIO + 0.01, `${w}x${h}`);
+            check("keeps the flow's orientation", dir === "LR" ? w >= h : h >= w, `${w}x${h}`);
+            const bad = flowErrors(chain.map((n) => ["#" + n.id, n]), { wrap: true, stack: true });
+            check("reads in rows, left to right", bad.length === 0, bad.join(", "));
+            check("members stay in the group", members.every((n) => centreIn(n, G)));
+            const ov = rectOverlaps(members.map((n) => [n.id, n]));
+            check("no overlaps", ov.length === 0, ov.join(", "));
+            const s = snapshot(graph);
+            await arrange(graph, layout);
+            const m = moved(s, snapshot(graph));
+            check("second run moves nothing", m.length === 0, m.join(", "));
+        }
+    }
+}
+setSettingsSource(() => ({}));
+
+// Stacking survives other links: the loaders still share columns with a
+// Display hanging off one or a concat fed by all (wrapping off, so only
+// stacking counts).
+for (const [name, layout] of LAYOUTS) {
+    for (const extra of ["", "concat", "display"]) {
+        setSettingsSource(() => ({ rankdir: "LR", wrapTrigger: Infinity }));
+        console.log(`${name} LR stacking${extra ? " (" + extra + ")" : ""}`);
+        // Short neighbours that fit two to a column beside the 700 one.
+        const { graph, chain, members, G } = buildLongFlowGraph(extra, [700, 200, 250, 600, 150, 200, 480]);
+        await arrange(graph, layout);
+        const cols = new Set(chain.map((n) => Math.round(n.pos[0]))).size;
+        check("loaders share columns", cols < chain.length, `${cols} columns for ${chain.length}`);
+        const bad = flowErrors(chain.map((n) => ["#" + n.id, n]), { stack: true });
+        check("columns read left to right", bad.length === 0, bad.join(", "));
+        const ov = rectOverlaps(members.map((n) => [n.id, n]));
+        check("no overlaps", ov.length === 0, ov.join(", "));
+        check("members stay in the group", members.every((n) => centreIn(n, G)));
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check("second run moves nothing", m.length === 0, m.join(", "));
+    }
+}
+setSettingsSource(() => ({}));
 
 // ── Nested groups ──────────────────────────────────────────────────────────
 
@@ -1457,6 +1550,8 @@ function buildSingleGroupGraph({ rx = 600 } = {}) {
 }
 
 {
+    // Making room, not wrapping: the 4-node chain would wrap into rows.
+    setSettingsSource(() => ({ wrapTrigger: Infinity }));
     const cases = [
         ["Quick", "quick", "LR"], ["Smart LR", "smart", "LR"], ["Smart TB", "smart", "TB"],
         ["Advanced LR", "advanced", "LR"], ["Advanced TB", "advanced", "TB"],
@@ -1525,6 +1620,7 @@ function buildNestedTargetGraph() {
 
 {
     console.log("Arrange (Group) nested target");
+    setSettingsSource(() => ({ wrapTrigger: Infinity }));
     const { graph, inner, s, Inner, Outer, X } = buildNestedTargetGraph();
     const xBefore = X.pos[0], outerW = Outer.size[0];
     await arrangeGroup(graph, Inner, "quick");
@@ -1547,6 +1643,7 @@ function buildNestedTargetGraph() {
 
 {
     console.log("Arrange (Group) with a nested group");
+    setSettingsSource(() => ({}));
     for (const kind of ["quick", "smart", "advanced"]) {
         const { graph, inner, s, Inner, Outer } = buildNestedTargetGraph();
         graph.connect(s, 0, inner[0], 0);

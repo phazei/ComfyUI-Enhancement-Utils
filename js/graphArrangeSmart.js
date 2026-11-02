@@ -8,7 +8,7 @@
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, hasNoDrawnInput, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
 import { collectHiddenLinks, computeFlowOrder, sortChainsByFlow } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
-import { foldChains, packComponents, wrapOptions } from "./graphArrangeFold.js";
+import { finishGroupLayout, wrapOptions } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dagre Algorithms
@@ -203,13 +203,12 @@ export function arrangeDagre(graph, options) {
  * @returns {import("./graphArrangeGroups.js").GroupEngine}
  */
 export function smartGroupEngine(settings) {
+    const opts = { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep, wrap: wrapOptions(settings) };
+    const lr = { ...settings, rankdir: "LR" };
     return (items, view) => {
-        runDagreLayout(sortChainsByFlow(items, view.flow, view.graph, view.hidden), view.graph.links, settings, view.hidden);
-        const links = [...Object.values(view.graph.links || {}), ...view.hidden];
-        const horizontal = settings.rankdir !== "TB";
-        const opts = { horizontal, along: settings.ranksep, across: settings.nodesep, wrap: wrapOptions(settings) };
-        foldChains(items, links, opts);
-        packComponents(items, links, opts);
+        const run = (s) => runDagreLayout(sortChainsByFlow(items, view.flow, view.graph, view.hidden), view.graph.links, s, view.hidden);
+        run(settings);
+        return finishGroupLayout(items, [...Object.values(view.graph.links || {}), ...view.hidden], opts, () => run(lr));
     };
 }
 
