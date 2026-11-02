@@ -11,5 +11,10 @@
   "devDependencies": {
     "vite": "^5.4.0",
     "@comfyorg/comfyui-frontend-types": "^1.20.0"
+  },
+  "overrides": {
+    "postcss": {
+      "nanoid": "5.1.16"
+    }
   }
 }
