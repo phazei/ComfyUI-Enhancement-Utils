@@ -16,6 +16,15 @@ export const DEFAULTS = {
      * "mixed" = nodes fed from outside their group left, the rest right.
      */
     tbAlign: "mixed",
+    /**
+     * Wrapping inside groups (`graphArrangeFold.js`; no UI setting): a
+     * group's contents wrap once they are more than `wrapTrigger` times
+     * longer than wide in the direction that wrap handles, aiming for
+     * `wrapAspect` long side : short side, keeping the orientation they had
+     * (too tall -> 9:16, too wide -> 16:9).
+     */
+    wrapTrigger: 4,
+    wrapAspect: 16 / 9,
 };
 
 export const MARGIN = 50;

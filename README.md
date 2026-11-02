@@ -331,7 +331,7 @@ Right-click inside a group and the menu reads **Arrange (Group)**: only that gro
 - Hidden connections (Set/Get nodes, Use Everywhere) count when deciding what comes first, so groups linked only that way still line up in order. When groups feed each other, the side with more connections goes first.
 - A node outside a group that only takes from that group and feeds back into it is placed right next to the group.
 - Loose nodes outside groups (Get nodes, loaders) sit next to what they connect to.
-- Long chains inside a group (a run of LoRA loaders) are folded: short neighbours stack, and in Top-Bottom a very tall chain wraps into rows.
+- Long chains inside a group (a run of LoRA loaders) are folded: short neighbours stack, and in Top-Bottom a very tall chain wraps into rows. A group of separate nodes stacked into one long column or row (loaders that each feed something outside the group) wraps too.
 - Nodes with no connections go in a grid below the graph (or inside their group, if they're in one). With Advanced, groups not connected to anything else go in a grid below too.
 - Arranging the whole graph moves pinned nodes and groups too, and unpins them.
 - Spacing and group padding are in **Settings > EnhUtils > Arrange**.

@@ -44,4 +44,4 @@ export { arrangeFloatRight, arrangeFloatRightGroups } from "./graphArrangeQuick.
 export { arrangeDagre, arrangeDagreGroups } from "./graphArrangeSmart.js";
 export { arrangeELK } from "./graphArrangeAdvanced.js";
 export { placeWrappedLayers } from "./graphArrangeWrap.js";
-export { breakLines, findChains, FOLD_RATIO } from "./graphArrangeFold.js";
+export { breakLines, findChains, packComponents, FOLD_RATIO } from "./graphArrangeFold.js";

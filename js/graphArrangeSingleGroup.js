@@ -27,7 +27,7 @@ const EPS = 0.5;
 
 /** Per-group engines by layout name, and the global each one needs. */
 const ENGINES = {
-    quick: { make: () => quickGroupEngine() },
+    quick: { make: (s) => quickGroupEngine(s) },
     smart: { make: (s) => smartGroupEngine(s), lib: "dagre" },
     advanced: { make: (s) => elkGroupEngine(s), lib: "ELK" },
 };

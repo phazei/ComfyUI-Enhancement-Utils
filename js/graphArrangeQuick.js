@@ -5,7 +5,7 @@
 import { MARGIN, TITLE_HEIGHT, getSettings, sizeOf, partitionNodes, layoutDisconnectedNodes, getGraphBottom, positionSubgraphIO } from "./graphArrangeShared.js";
 import { collectHiddenLinks, computeFlowOrder, chainRanks, rankBlocks } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
-import { foldChains } from "./graphArrangeFold.js";
+import { foldChains, packComponents, wrapOptions } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Float Right Algorithm
@@ -146,12 +146,16 @@ export function arrangeFloatRight(graph) {
 /**
  * Quick's layout of one group's connected items (see `layoutGroupTree`).
  *
+ * @param {Object} [settings] - Layout settings (`getSettings`; only the wrap defaults are read).
  * @returns {import("./graphArrangeGroups.js").GroupEngine}
  */
-export function quickGroupEngine() {
+export function quickGroupEngine(settings) {
+    const opts = { horizontal: true, along: MARGIN, across: MARGIN, wrap: wrapOptions(settings) };
     return (items, view) => {
         floatRightLayout(items, view.graph, new Set(items.map((n) => n.id)), view.hidden, view.flow);
-        foldChains(items, [...Object.values(view.graph.links || {}), ...view.hidden], { horizontal: true, along: MARGIN, across: MARGIN });
+        const links = [...Object.values(view.graph.links || {}), ...view.hidden];
+        foldChains(items, links, opts);
+        packComponents(items, links, opts);
     };
 }
 
@@ -189,7 +193,7 @@ export async function arrangeFloatRightGroups(graph) {
     // ── Phase 1: Layout within each group ──────────────────────────
 
     const groupSizes = new Map();
-    const engine = quickGroupEngine();
+    const engine = quickGroupEngine(settings);
     for (const group of topLevelGroups) {
         groupSizes.set(group, await layoutGroupTree(graph, group, resolved, { padding, hidden, flow }, engine));
     }

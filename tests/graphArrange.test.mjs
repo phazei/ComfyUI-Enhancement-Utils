@@ -664,7 +664,8 @@ function buildBridgeGraph() {
     }
     for (const [name, layout] of LAYOUTS) {
         for (const dir of name.startsWith("Quick") ? ["LR"] : ["LR", "TB"]) { // Quick is LR only.
-            setSettingsSource(() => ({ rankdir: dir }));
+            // Order along the flow only: the 5-node chain would wrap in TB.
+            setSettingsSource(() => ({ rankdir: dir, wrapTrigger: Infinity }));
             const { graph: gr, st: st2, ap: ap2, e: e2 } = buildBridgeGraph();
             await arrange(gr, layout);
             const k = dir === "LR" ? 0 : 1;
@@ -1257,6 +1258,71 @@ for (const [name, layout] of [["Smart (dagre)", arrangeDagreGroups], ["Advanced 
     const ue = buildUseEverywhereGraph();
     const uePairs = collectHiddenLinks(ue.graph).map((l) => `${l.origin_id}>${l.target_id}`);
     check("Use Everywhere: broadcaster -> receiver", JSON.stringify(uePairs) === JSON.stringify(["2>3"]), JSON.stringify(uePairs));
+}
+
+// ── Separate pieces wrap ───────────────────────────────────────────────────
+
+/**
+ * A group of 9 loaders (one step, nothing linking them inside the group),
+ * each feeding one node in another group -- one long column / row unless
+ * the pieces wrap.
+ */
+function buildLoaderColumnGraph() {
+    const graph = new MockGraph();
+    const sink = graph.add(new MockNode(100, "Sink", 1000, 0, 540, 820, 9, 0));
+    const loaders = [];
+    for (let i = 0; i < 9; i++) {
+        const node = graph.add(new MockNode(i + 1, "Loader", 0, i * 500, 420, i % 3 === 0 ? 620 : 350, 0, 1));
+        graph.connect(node, 0, sink, i);
+        loaders.push(node);
+    }
+    const G = graph.add(new MockGroup(1, "Loaders", ...frameAround(loaders, 30, 34)));
+    graph.add(new MockGroup(2, "Sink", ...frameAround([sink], 30, 34)));
+    for (const g of graph._groups) g.recomputeInsideNodes();
+    return { graph, loaders, G };
+}
+
+for (const [name, layout] of LAYOUTS) {
+    for (const dir of name.startsWith("Quick") ? ["LR"] : ["LR", "TB"]) {
+        setSettingsSource(() => ({ rankdir: dir }));
+        console.log(`${name} ${dir} separate pieces wrap`);
+        const { graph, loaders, G } = buildLoaderColumnGraph();
+        await arrange(graph, layout);
+        const long = Math.max(G.size[0], G.size[1]) / Math.min(G.size[0], G.size[1]);
+        check("group is not a long line", long <= FOLD_RATIO, `${G.size}`);
+        check("loaders stay in the group", loaders.every((n) => centreIn(n, G)));
+        const ov = rectOverlaps(loaders.map((n) => [n.id, n]));
+        check("no overlaps", ov.length === 0, ov.join(", "));
+        const s = snapshot(graph);
+        await arrange(graph, layout);
+        const m = moved(s, snapshot(graph));
+        check("second run moves nothing", m.length === 0, m.join(", "));
+    }
+}
+setSettingsSource(() => ({}));
+
+{
+    console.log("Wrap trigger / aspect");
+    const runWith = async (settings, layout = arrangeFloatRightGroups) => {
+        setSettingsSource(() => settings);
+        const { graph, loaders, G } = buildLoaderColumnGraph();
+        await arrange(graph, layout);
+        const cols = new Set(loaders.map((n) => Math.round(n.pos[0] + n.size[0]))).size;
+        return { G, cols };
+    };
+    const lr = await runWith({});
+    check("left-to-right default: the tall column wraps but stays taller than wide (9:16)",
+        lr.cols > 1 && lr.G.size[1] > lr.G.size[0], `${lr.cols} cols, ${lr.G.size}`);
+    const never = await runWith({ wrapTrigger: Infinity });
+    check("trigger Infinity: stays one column", never.cols === 1, `${never.cols}`);
+    const high = await runWith({ wrapTrigger: 12 });
+    check("trigger above the group's ratio: no wrap", high.cols === 1, `${high.cols}`);
+    const square = await runWith({ wrapAspect: 1 });
+    check("aspect override: square gives more columns than 9:16", square.cols > lr.cols, `${square.cols} vs ${lr.cols}`);
+    const tb = await runWith({ rankdir: "TB" }, arrangeDagreGroups);
+    check("top-to-bottom default: the wide row wraps but stays wider than tall (16:9)",
+        tb.G.size[0] > tb.G.size[1] && tb.G.size[0] / tb.G.size[1] <= FOLD_RATIO, `${tb.G.size}`);
+    setSettingsSource(() => ({}));
 }
 
 // ── Nested groups ──────────────────────────────────────────────────────────

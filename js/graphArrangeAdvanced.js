@@ -9,7 +9,7 @@ import { TITLE_HEIGHT, getSettings, sizeOf, hasNoDrawnInput, partitionNodes, lay
 import { collectHiddenLinks, computeFlowOrder, sortChainsByFlow, rankBlocks } from "./graphArrangeFlow.js";
 import { resolveGroups, layoutGroupTree, getLayoutBottom, placeGroup, buildTopLevelEdges, findSatellites } from "./graphArrangeGroups.js";
 import { orderLayers, placeWrappedLayers } from "./graphArrangeWrap.js";
-import { foldChains } from "./graphArrangeFold.js";
+import { foldChains, packComponents, wrapOptions } from "./graphArrangeFold.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ELK (Eclipse Layout Kernel) -- Layered Algorithm with Port Awareness
@@ -145,8 +145,11 @@ async function runElkLayout(nodes, graph, hidden, settings) {
 export function elkGroupEngine(settings) {
     return async (items, view) => {
         if (!(await runElkLayout(sortChainsByFlow(items, view.flow, view.graph, view.hidden), view.graph, view.hidden, settings))) return false;
-        foldChains(items, [...Object.values(view.graph.links || {}), ...view.hidden],
-            { horizontal: settings.rankdir !== "TB", along: settings.ranksep, across: settings.nodesep });
+        const links = [...Object.values(view.graph.links || {}), ...view.hidden];
+        const horizontal = settings.rankdir !== "TB";
+        const opts = { horizontal, along: settings.ranksep, across: settings.nodesep, wrap: wrapOptions(settings) };
+        foldChains(items, links, opts);
+        packComponents(items, links, opts);
         return true;
     };
 }
